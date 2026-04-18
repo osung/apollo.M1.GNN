@@ -1,9 +1,12 @@
 PY ?= python
 
-.PHONY: data compress-graph decompress-graph train train-coldstart index eval infer test lint baseline-two-tower baseline-cf baseline-lightfm
+.PHONY: data similarity compress-graph decompress-graph train train-coldstart index eval infer test lint baseline-two-tower baseline-cf baseline-lightfm
 
 data:
 	$(PY) scripts/build_graph.py
+
+similarity:
+	$(PY) scripts/build_similarity.py
 
 compress-graph:
 	$(PY) scripts/compress_graph.py
