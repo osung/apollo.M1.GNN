@@ -47,6 +47,10 @@ def main() -> None:
     parser.add_argument("--no-components", type=int, default=64)
     parser.add_argument("--topk", type=int, default=100)
     parser.add_argument("--limit-queries", type=int, default=None)
+    parser.add_argument("--use-identity", action="store_true",
+                        help="add identity features per node (heavy memory; "
+                             "skip it to get a feature-only hybrid)")
+    parser.add_argument("--loss", default="warp", choices=["warp", "bpr", "logistic"])
     args = parser.parse_args()
 
     paths = load_yaml(args.paths)
@@ -66,9 +70,17 @@ def main() -> None:
         et: float(graph_cfg["edge_types"][et]["weight"]) for et in REAL_EDGE_TYPES
     }
 
-    cfg = LightFMConfig(no_components=args.no_components, epochs=args.epochs)
+    cfg = LightFMConfig(
+        no_components=args.no_components,
+        epochs=args.epochs,
+        use_identity=args.use_identity,
+        loss=args.loss,
+    )
     model = LightFMBaseline(cfg)
-    print(f"[lightfm] fitting with no_components={cfg.no_components}, epochs={cfg.epochs}...")
+    print(
+        f"[lightfm] fitting: no_components={cfg.no_components} "
+        f"epochs={cfg.epochs} use_identity={cfg.use_identity}"
+    )
     model.fit(project_x, company_x, train_edges, relation_weights)
 
     held_edges = _collect_edges(held_out, REAL_EDGE_TYPES)

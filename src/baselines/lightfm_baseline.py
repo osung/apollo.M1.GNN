@@ -27,6 +27,8 @@ class LightFMConfig:
     user_alpha: float = 1e-6
     epochs: int = 20
     num_threads: int = 1
+    use_identity: bool = True
+    query_batch_size: int = 256
 
 
 def _interaction_matrix(
@@ -78,15 +80,18 @@ def _interaction_matrix(
     return interactions, weights
 
 
-def _identity_plus_features(content: np.ndarray) -> sparse.csr_matrix:
-    """Stack identity (N x N) on the left + content (N x D) as features on the right.
+def _node_features(content: np.ndarray, use_identity: bool) -> sparse.csr_matrix:
+    """Build the LightFM feature matrix for one node side.
 
-    LightFM treats features as additive; including identity lets warm nodes
-    learn per-id embeddings on top of the shared content projection.
+    - use_identity=True: identity (N x N) ⊕ content (N x D). Warm nodes get
+      their own id-embedding in addition to the shared content projection.
+    - use_identity=False: content only. Pure linear projection over norm_embed.
     """
-    n, d = content.shape
-    identity = sparse.identity(n, format="csr", dtype=np.float32)
+    n, _ = content.shape
     content_csr = sparse.csr_matrix(content.astype(np.float32))
+    if not use_identity:
+        return content_csr
+    identity = sparse.identity(n, format="csr", dtype=np.float32)
     return sparse.hstack([identity, content_csr], format="csr")
 
 
@@ -109,8 +114,8 @@ class LightFMBaseline:
         n_p, n_c = project_x.shape[0], company_x.shape[0]
         self.n_users, self.n_items = n_p, n_c
 
-        self.user_features = _identity_plus_features(project_x)
-        self.item_features = _identity_plus_features(company_x)
+        self.user_features = _node_features(project_x, self.cfg.use_identity)
+        self.item_features = _node_features(company_x, self.cfg.use_identity)
 
         interactions, weights = _interaction_matrix(
             edges_per_relation, relation_weights, n_p, n_c
@@ -130,34 +135,60 @@ class LightFMBaseline:
             item_features=self.item_features,
             epochs=self.cfg.epochs,
             num_threads=self.cfg.num_threads,
+            verbose=True,
         )
         return self
+
+    def _materialize_representations(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Compute per-node bias and embedding for both sides (dense)."""
+        assert self.model is not None
+        u_bias, u_emb = self.model.get_user_representations(self.user_features)
+        i_bias, i_emb = self.model.get_item_representations(self.item_features)
+        return (
+            np.asarray(u_bias, dtype=np.float32),
+            np.asarray(u_emb, dtype=np.float32),
+            np.asarray(i_bias, dtype=np.float32),
+            np.asarray(i_emb, dtype=np.float32),
+        )
 
     def recommend_companies(
         self, project_indices: np.ndarray, topk: int = 100
     ) -> tuple[np.ndarray, np.ndarray]:
+        """Batched top-k using LightFM's dense latent factors.
+
+        score(u, i) = u_emb[u] · i_emb[i] + u_bias[u] + i_bias[i]
+        """
         if self.model is None:
             raise RuntimeError("call .fit() first")
+
+        u_bias, u_emb, i_bias, i_emb = self._materialize_representations()
         project_indices = np.asarray(project_indices, dtype=np.int64)
         Q = project_indices.shape[0]
-        all_items = np.arange(self.n_items, dtype=np.int64)
+        bs = max(1, self.cfg.query_batch_size)
 
         top_idx = np.empty((Q, topk), dtype=np.int64)
         top_scores = np.empty((Q, topk), dtype=np.float32)
-        for i, u in enumerate(project_indices):
-            scores = self.model.predict(
-                int(u),
-                all_items,
-                user_features=self.user_features,
-                item_features=self.item_features,
-                num_threads=self.cfg.num_threads,
-            )
-            k = min(topk, scores.shape[0])
-            part = np.argpartition(-scores, kth=k - 1)[:k]
-            order = np.argsort(-scores[part])
-            top_idx[i, :k] = part[order]
-            top_scores[i, :k] = scores[part[order]]
-            if k < topk:
-                top_idx[i, k:] = -1
-                top_scores[i, k:] = -np.inf
+
+        for start in range(0, Q, bs):
+            end = min(start + bs, Q)
+            u_ids = project_indices[start:end]
+            batch_emb = u_emb[u_ids]
+            scores = batch_emb @ i_emb.T
+            scores += u_bias[u_ids, None]
+            scores += i_bias[None, :]
+            idx_b, sc_b = _topk_rows(scores, topk)
+            top_idx[start:end] = idx_b
+            top_scores[start:end] = sc_b
+
         return top_idx, top_scores
+
+
+def _topk_rows(scores: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+    Q, N = scores.shape
+    k = min(k, N)
+    part = np.argpartition(-scores, kth=k - 1, axis=1)[:, :k]
+    part_scores = np.take_along_axis(scores, part, axis=1)
+    order = np.argsort(-part_scores, axis=1)
+    top_idx = np.take_along_axis(part, order, axis=1)
+    top_scores = np.take_along_axis(part_scores, order, axis=1)
+    return top_idx.astype(np.int64), top_scores
