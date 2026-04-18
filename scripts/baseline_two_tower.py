@@ -1,7 +1,6 @@
-"""Evaluate the memory-based neighborhood CF baseline on held-out edges.
+"""Evaluate the zero-training two-tower baseline on held-out edges.
 
-Usage: python scripts/baseline_cf.py
-       (reads config/paths.yaml, config/graph.yaml, config/train.yaml)
+Uses `norm_embed` directly via FAISS IndexFlatIP — no training.
 """
 from __future__ import annotations
 
@@ -15,7 +14,6 @@ import faiss
 faiss.omp_set_num_threads(1)
 
 import argparse
-import pickle
 import sys
 from pathlib import Path
 
@@ -26,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.baselines.neighborhood_cf import CFConfig, NeighborhoodCF
+from src.baselines.two_tower import TwoTowerBaseline
 from src.eval.ranking import evaluate, group_ground_truth
 from src.graph.schema import (
     EDGE_COMMERCIAL,
@@ -51,46 +49,29 @@ def _collect_edges(graph, edge_types) -> dict[str, np.ndarray]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--paths", default="config/paths.yaml")
-    parser.add_argument("--graph-cfg", default="config/graph.yaml")
-    parser.add_argument("--train-cfg", default="config/train.yaml")
-    parser.add_argument("--k-neighbors", type=int, default=50)
     parser.add_argument("--topk", type=int, default=100)
-    parser.add_argument("--limit-queries", type=int, default=None,
-                        help="optional cap on number of eval queries for quick runs")
+    parser.add_argument("--limit-queries", type=int, default=None)
     parser.add_argument("--direction", default="p2c", choices=["p2c", "c2p"])
     args = parser.parse_args()
 
     paths = load_yaml(args.paths)
-    graph_cfg = load_yaml(args.graph_cfg)
-    train_cfg = load_yaml(args.train_cfg)
-
     graph_path = paths["processed"]["graph"]
     held_out_path = str(Path(graph_path).with_name("held_out.pt"))
 
-    print(f"[cf] loading graph {graph_path}")
+    print(f"[two-tower] loading graph {graph_path}")
     graph = torch.load(graph_path, weights_only=False)
-    print(f"[cf] loading held_out {held_out_path}")
     held_out = torch.load(held_out_path, weights_only=False)
 
     project_x = graph[NODE_TYPE_PROJECT].x.numpy()
     company_x = graph[NODE_TYPE_COMPANY].x.numpy()
-    train_edges = _collect_edges(graph, REAL_EDGE_TYPES)
-    relation_weights = {
-        et: float(graph_cfg["edge_types"][et]["weight"]) for et in REAL_EDGE_TYPES
-    }
 
-    cf = NeighborhoodCF(
-        project_x=project_x,
-        company_x=company_x,
-        edges_per_relation=train_edges,
-        relation_weights=relation_weights,
-        config=CFConfig(k_neighbors=args.k_neighbors, topk=args.topk),
-    )
-    print(f"[cf] built CF: projects={project_x.shape[0]:,}, companies={company_x.shape[0]:,}")
+    tt = TwoTowerBaseline(project_x, company_x)
+    print(f"[two-tower] indices built: p={project_x.shape[0]:,} c={company_x.shape[0]:,}")
 
     held_edges = _collect_edges(held_out, REAL_EDGE_TYPES)
+
     gt_direction = "project_to_company" if args.direction == "p2c" else "company_to_project"
-    recommend = cf.recommend_companies if args.direction == "p2c" else cf.recommend_projects
+    recommend = tt.recommend_companies if args.direction == "p2c" else tt.recommend_projects
 
     per_relation_metrics: dict[str, dict[str, float]] = {}
     for et in REAL_EDGE_TYPES:
@@ -101,11 +82,11 @@ def main() -> None:
         query_ids = list(gt.keys())
         if args.limit_queries:
             query_ids = query_ids[: args.limit_queries]
-        print(f"[cf] evaluating {et}: {len(query_ids)} queries")
-        preds, _ = recommend(np.asarray(query_ids, dtype=np.int64))
+        print(f"[two-tower] evaluating {et}: {len(query_ids)} queries")
+        preds, _ = recommend(np.asarray(query_ids, dtype=np.int64), topk=args.topk)
         per_relation_metrics[et] = evaluate(preds, query_ids, gt, ks=(10, args.topk))
 
-    print(f"\n=== Memory-based Neighborhood CF [{args.direction}] ===")
+    print(f"\n=== Two-Tower (norm_embed + FAISS, zero training) [{args.direction}] ===")
     for et, m in per_relation_metrics.items():
         print(f"  {et:12s}  " + "  ".join(f"{k}={v:.4f}" for k, v in m.items()))
 

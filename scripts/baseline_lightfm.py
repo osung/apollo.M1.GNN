@@ -54,6 +54,7 @@ def main() -> None:
         help="identity features scope: none | warm (only nodes with edges) | all",
     )
     parser.add_argument("--loss", default="warp", choices=["warp", "bpr", "logistic"])
+    parser.add_argument("--direction", default="p2c", choices=["p2c", "c2p"])
     args = parser.parse_args()
 
     paths = load_yaml(args.paths)
@@ -87,23 +88,23 @@ def main() -> None:
     model.fit(project_x, company_x, train_edges, relation_weights)
 
     held_edges = _collect_edges(held_out, REAL_EDGE_TYPES)
+    gt_direction = "project_to_company" if args.direction == "p2c" else "company_to_project"
+    recommend = model.recommend_companies if args.direction == "p2c" else model.recommend_projects
 
     per_relation_metrics: dict[str, dict[str, float]] = {}
     for et in REAL_EDGE_TYPES:
         ei = held_edges[et]
         if ei.shape[1] == 0:
             continue
-        gt = group_ground_truth(ei, direction="project_to_company")
+        gt = group_ground_truth(ei, direction=gt_direction)
         query_ids = list(gt.keys())
         if args.limit_queries:
             query_ids = query_ids[: args.limit_queries]
         print(f"[lightfm] evaluating {et}: {len(query_ids)} queries")
-        preds, _ = model.recommend_companies(
-            np.asarray(query_ids, dtype=np.int64), topk=args.topk
-        )
+        preds, _ = recommend(np.asarray(query_ids, dtype=np.int64), topk=args.topk)
         per_relation_metrics[et] = evaluate(preds, query_ids, gt, ks=(10, args.topk))
 
-    print("\n=== LightFM (project -> company) ===")
+    print(f"\n=== LightFM [{args.direction}] ===")
     for et, m in per_relation_metrics.items():
         print(f"  {et:12s}  " + "  ".join(f"{k}={v:.4f}" for k, v in m.items()))
 

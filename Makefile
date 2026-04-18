@@ -1,6 +1,6 @@
 PY ?= python
 
-.PHONY: data train train-coldstart index eval infer test lint baseline-cf baseline-lightfm
+.PHONY: data train train-coldstart index eval infer test lint baseline-two-tower baseline-cf baseline-lightfm
 
 data:
 	$(PY) scripts/build_graph.py
@@ -16,6 +16,9 @@ index:
 
 eval:
 	$(PY) scripts/evaluate.py
+
+baseline-two-tower:
+	$(PY) scripts/baseline_two_tower.py
 
 baseline-cf:
 	$(PY) scripts/baseline_cf.py

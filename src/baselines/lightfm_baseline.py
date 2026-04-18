@@ -293,33 +293,71 @@ class LightFMBaseline:
     def recommend_companies(
         self, project_indices: np.ndarray, topk: int = 100
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Batched top-k using dense latent factors.
+        """For each project query, return top-k company candidates."""
+        if self.model is None:
+            raise RuntimeError("call .fit() first")
+        u_bias, u_emb, i_bias, i_emb = self._materialize_representations()
+        return _batched_topk(
+            query_ids=np.asarray(project_indices, dtype=np.int64),
+            query_emb=u_emb,
+            query_bias=u_bias,
+            candidate_emb=i_emb,
+            candidate_bias=i_bias,
+            topk=topk,
+            batch_size=self.cfg.query_batch_size,
+        )
 
-        score(u, i) = u_emb[u] · i_emb[i] + u_bias[u] + i_bias[i]
+    def recommend_projects(
+        self, company_indices: np.ndarray, topk: int = 100
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Reverse direction: for each company query, return top-k projects.
+
+        LightFM's WARP loss trains user_embedding as *query* and item_embedding
+        as *candidate*. user_bias gets no pairwise gradient (cancels out) and
+        is therefore noise when used as candidate bias in this direction.
+        We drop the candidate-side bias here; query-side bias is constant
+        across candidates and doesn't affect ranking anyway, so the scoring
+        reduces to the dot product only.
         """
         if self.model is None:
             raise RuntimeError("call .fit() first")
+        _, u_emb, _, i_emb = self._materialize_representations()
+        zero = np.zeros(u_emb.shape[0], dtype=np.float32)
+        return _batched_topk(
+            query_ids=np.asarray(company_indices, dtype=np.int64),
+            query_emb=i_emb,
+            query_bias=np.zeros(i_emb.shape[0], dtype=np.float32),
+            candidate_emb=u_emb,
+            candidate_bias=zero,
+            topk=topk,
+            batch_size=self.cfg.query_batch_size,
+        )
 
-        u_bias, u_emb, i_bias, i_emb = self._materialize_representations()
-        project_indices = np.asarray(project_indices, dtype=np.int64)
-        Q = project_indices.shape[0]
-        bs = max(1, self.cfg.query_batch_size)
 
-        top_idx = np.empty((Q, topk), dtype=np.int64)
-        top_scores = np.empty((Q, topk), dtype=np.float32)
-
-        for start in range(0, Q, bs):
-            end = min(start + bs, Q)
-            u_ids = project_indices[start:end]
-            batch_emb = u_emb[u_ids]
-            scores = batch_emb @ i_emb.T
-            scores += u_bias[u_ids, None]
-            scores += i_bias[None, :]
-            idx_b, sc_b = _topk_rows(scores, topk)
-            top_idx[start:end] = idx_b
-            top_scores[start:end] = sc_b
-
-        return top_idx, top_scores
+def _batched_topk(
+    query_ids: np.ndarray,
+    query_emb: np.ndarray,
+    query_bias: np.ndarray,
+    candidate_emb: np.ndarray,
+    candidate_bias: np.ndarray,
+    topk: int,
+    batch_size: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    Q = query_ids.shape[0]
+    bs = max(1, batch_size)
+    top_idx = np.empty((Q, topk), dtype=np.int64)
+    top_scores = np.empty((Q, topk), dtype=np.float32)
+    for start in range(0, Q, bs):
+        end = min(start + bs, Q)
+        q = query_ids[start:end]
+        batch_emb = query_emb[q]
+        scores = batch_emb @ candidate_emb.T
+        scores += query_bias[q, None]
+        scores += candidate_bias[None, :]
+        idx_b, sc_b = _topk_rows(scores, topk)
+        top_idx[start:end] = idx_b
+        top_scores[start:end] = sc_b
+    return top_idx, top_scores
 
 
 def _topk_rows(scores: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
