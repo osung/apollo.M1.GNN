@@ -54,10 +54,24 @@ def _evaluate_z(
     z_dict: dict[str, torch.Tensor],
     held_out,
     topk: int,
+    direction: str = "p2c",
     batch_size: int = 256,
 ) -> dict[str, dict[str, float]]:
+    """Evaluate embeddings against held-out edges.
+
+    direction = "p2c": project queries, company candidates
+    direction = "c2p": company queries, project candidates
+    """
     z_p = z_dict[NODE_TYPE_PROJECT].numpy()
     z_c = z_dict[NODE_TYPE_COMPANY].numpy()
+    if direction == "p2c":
+        z_query, z_cand = z_p, z_c
+        gt_direction = "project_to_company"
+    elif direction == "c2p":
+        z_query, z_cand = z_c, z_p
+        gt_direction = "company_to_project"
+    else:
+        raise ValueError(f"direction must be p2c or c2p, got {direction}")
 
     results: dict[str, dict[str, float]] = {}
     for et in REAL_EDGE_TYPES:
@@ -65,13 +79,19 @@ def _evaluate_z(
         ei = held_out[rel].edge_index.numpy()
         if ei.shape[1] == 0:
             continue
-        gt = group_ground_truth(ei, direction="project_to_company")
+        gt = group_ground_truth(ei, direction=gt_direction)
         query_ids = list(gt.keys())
         preds = _batched_topk(
-            np.asarray(query_ids, dtype=np.int64), z_p, z_c, topk=topk, bs=batch_size
+            np.asarray(query_ids, dtype=np.int64), z_query, z_cand, topk=topk, bs=batch_size
         )
         results[et] = evaluate(preds, query_ids, gt, ks=(10, topk))
     return results
+
+
+def _print_metrics(label: str, metrics: dict[str, dict[str, float]]) -> None:
+    print(f"\n=== {label} ===")
+    for et, m in metrics.items():
+        print(f"  {et:12s}  " + "  ".join(f"{k}={v:.4f}" for k, v in m.items()))
 
 
 def _batched_topk(
@@ -110,6 +130,22 @@ def main() -> None:
     parser.add_argument("--topk", type=int, default=100)
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument(
+        "--held-out-path", default=None,
+        help="override held_out.pt location (default: sibling of graph path)",
+    )
+    parser.add_argument(
+        "--direction", default="p2c", choices=["p2c", "c2p", "both"],
+        help="eval direction (both runs project->company and company->project)",
+    )
+    parser.add_argument(
+        "--save-metrics", default=None,
+        help="path to write JSON with eval metrics (final run, and per-checkpoint if --eval-at-checkpoint)",
+    )
+    parser.add_argument(
+        "--eval-at-checkpoint", action="store_true",
+        help="run held-out evaluation at each checkpoint epoch (mid-training monitoring)",
+    )
+    parser.add_argument(
         "--checkpoint-every", type=int, default=0,
         help="save intermediate z/model every N epochs (0 = disabled)",
     )
@@ -136,7 +172,8 @@ def main() -> None:
     set_seed(seed)
 
     graph_path = args.graph_path or paths["processed"]["graph"]
-    held_out_path = str(Path(paths["processed"]["graph"]).with_name("held_out.pt"))
+    default_held_out = str(Path(paths["processed"]["graph"]).with_name("held_out.pt"))
+    held_out_path = args.held_out_path or default_held_out
     print(f"[train_gnn] loading graph {graph_path}")
     graph = torch.load(graph_path, weights_only=False)
     held_out = torch.load(held_out_path, weights_only=False)
@@ -246,6 +283,21 @@ def main() -> None:
                 import json
                 json.dump(hist, f, indent=2)
 
+            if args.eval_at_checkpoint:
+                directions = ["p2c", "c2p"] if args.direction == "both" else [args.direction]
+                ckpt_metrics: dict[str, dict] = {}
+                for d in directions:
+                    m = _evaluate_z(z_dict_cpu, held_out, topk=args.topk, direction=d)
+                    _print_metrics(
+                        f"GNN [{layer_type}] epoch {epoch_idx} [{d}] K={args.topk}", m,
+                    )
+                    ckpt_metrics[d] = m
+                mm_path = ckpt_dir / f"metrics_{suffix}.json"
+                with open(mm_path, "w") as f:
+                    import json
+                    json.dump(ckpt_metrics, f, indent=2)
+                print(f"[ckpt] epoch {epoch_idx}: saved {mm_path.name}")
+
         print(
             f"[train_gnn] checkpointing every {args.checkpoint_every} epochs -> {ckpt_dir}"
         )
@@ -272,10 +324,19 @@ def main() -> None:
     print(f"[train_gnn] saved company z -> {out_c}")
 
     if not args.no_eval:
-        metrics = _evaluate_z(result.z_dict, held_out, topk=args.topk)
-        print(f"\n=== GNN [{layer_type}] (project -> company, K={args.topk}) ===")
-        for et, m in metrics.items():
-            print(f"  {et:12s}  " + "  ".join(f"{k}={v:.4f}" for k, v in m.items()))
+        directions = ["p2c", "c2p"] if args.direction == "both" else [args.direction]
+        final_metrics: dict[str, dict] = {}
+        for d in directions:
+            metrics = _evaluate_z(result.z_dict, held_out, topk=args.topk, direction=d)
+            _print_metrics(f"GNN [{layer_type}] final [{d}] K={args.topk}", metrics)
+            final_metrics[d] = metrics
+        if args.save_metrics:
+            out = Path(args.save_metrics)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with open(out, "w") as f:
+                import json
+                json.dump(final_metrics, f, indent=2)
+            print(f"[train_gnn] saved metrics -> {out}")
 
 
 if __name__ == "__main__":
