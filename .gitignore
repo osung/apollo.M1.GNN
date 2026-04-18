@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+
+# data
+data/raw/
+data/processed/
+
+# model / index artifacts
+*.pt
+*.index
+*.npy
+
+# tooling
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# editor
+.vscode/
+.idea/
+.DS_Store

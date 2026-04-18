@@ -1,0 +1,12 @@
+numpy
+pandas
+pyyaml
+torch>=2.0
+torch-geometric>=2.5
+faiss-cpu
+tqdm
+
+# dev
+pytest
+ruff
+mypy

@@ -1,0 +1,23 @@
+raw:
+  projects: data/raw/public_RnD_embeddings_pro_260324.pkl
+  companies: data/raw/company_embeddings_pro_0925_260324.pkl
+  edges_royalty: data/raw/df_pr_royalty_260417_valid_biz.pkl
+  edges_commercial: data/raw/df_pr_commercial_260417_valid_biz.pkl
+  edges_performance: data/raw/df_project_bizno_valid.pkl
+
+processed:
+  graph: data/processed/graph.pt
+  project_emb: data/processed/project_z.npy
+  company_emb: data/processed/company_z.npy
+  projection_mlp: data/processed/projection_mlp.pt
+  faiss_project_index: data/processed/faiss_project.index
+  faiss_company_index: data/processed/faiss_company.index
+
+id_columns:
+  project: 과제고유번호
+  company: 사업자번호
+
+edge_columns:
+  royalty: { project: 과제고유번호, company: 기술실시대상기관_사업자번호 }
+  commercial: { project: 과제고유번호, company: 사업화주체_사업자등록번호 }
+  performance: { project: 과제고유번호, company: 사업자번호 }

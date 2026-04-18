@@ -1,0 +1,25 @@
+seed: 42
+
+gnn:
+  epochs: 30
+  batch_size: 4096
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+  num_neg_samples: 5
+  loss: weighted_bpr
+  held_out_ratio: 0.1
+  early_stopping_patience: 5
+
+projection_mlp:
+  epochs: 50
+  batch_size: 8192
+  lr: 1.0e-3
+  weight_decay: 1.0e-6
+
+eval:
+  k: 100
+  metrics: [recall, ndcg]
+
+serving:
+  topk: 100
+  faiss_metric: inner_product
