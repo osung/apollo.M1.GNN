@@ -96,6 +96,10 @@ def main() -> None:
     parser.add_argument("--graph-cfg", default="config/graph.yaml")
     parser.add_argument("--model-cfg", default="config/model.yaml")
     parser.add_argument("--train-cfg", default="config/train.yaml")
+    parser.add_argument(
+        "--graph-path", default=None,
+        help="override paths.yaml processed.graph (e.g. pass graph_fp16.pt directly)",
+    )
     parser.add_argument("--layer-type", default=None,
                         help="override model.yaml gnn.type: sage|gcn|gat|hgt")
     parser.add_argument("--hidden-dim", type=int, default=None)
@@ -131,11 +135,17 @@ def main() -> None:
     seed = int(train_cfg.get("seed", 42))
     set_seed(seed)
 
-    graph_path = paths["processed"]["graph"]
-    held_out_path = str(Path(graph_path).with_name("held_out.pt"))
+    graph_path = args.graph_path or paths["processed"]["graph"]
+    held_out_path = str(Path(paths["processed"]["graph"]).with_name("held_out.pt"))
     print(f"[train_gnn] loading graph {graph_path}")
     graph = torch.load(graph_path, weights_only=False)
     held_out = torch.load(held_out_path, weights_only=False)
+
+    for nt in graph.node_types:
+        x = getattr(graph[nt], "x", None)
+        if x is not None and x.dtype != torch.float32:
+            print(f"[train_gnn] casting {nt}.x {x.dtype} -> torch.float32")
+            graph[nt].x = x.float()
 
     layer_type = (args.layer_type or model_cfg["gnn"].get("type", "sage")).lower()
     gnn_cfg = model_cfg["gnn"]
