@@ -1,18 +1,22 @@
 """Visualize 2-hop neighborhoods of the top-scoring project / company seeds.
 
-Selection:
-- Top 10 projects and top 10 companies ranked by `유망성점수` (promising score).
-- 20 seeds total → 20 PDF pages.
+Layout per page:
+    ┌───────────────┬───────────────┐
+    │               │  Node table   │
+    │   Graph       │───────────────┤
+    │   (symbols)   │  Edge table   │
+    └───────────────┴───────────────┘
 
-Per seed:
-- Include ALL real-relation neighbors (royalty / commercial / performance).
-- Include at most `TOP_SIM_K` similarity neighbors (cosine similarity, recomputed
-  on the fly via FAISS — the sim_edges.npz cache does not store scores).
-- Expand 2 hops (seed + 1-hop + 2-hop).
-- Both real and similarity edges are pruned at every node by the same rule
-  (all real, top-5 sim).
+- The graph is drawn on the left half; node labels are short symbols
+  (P0 is the seed project, C0 the seed company; other projects are
+  P1, P2, … and companies C1, C2, …).
+- The right half has two tables that let the reader decode the symbols:
+  a Nodes table (Symbol | Type | Name) and an Edges table
+  (Project | Company | Relation) in canonical (project → company)
+  orientation.
 
-Output: a single multi-page PDF with one seed per page.
+Similarity edges are capped per node (default top-3) so the picture
+stays readable; real relations are kept in full.
 """
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ faiss.omp_set_num_threads(4)
 import argparse
 import pickle
 import sys
+import textwrap
 import warnings
 from pathlib import Path
 
@@ -39,6 +44,7 @@ import numpy as np
 import pandas as pd
 import torch
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.gridspec import GridSpec
 from matplotlib.lines import Line2D
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,23 +61,17 @@ EDGE_COLOR = {
     "performance": "#9467bd",
     "similarity": "#808080",
 }
-EDGE_WIDTH = {"royalty": 2.0, "commercial": 2.0, "performance": 2.0, "similarity": 0.6}
+EDGE_WIDTH = {"royalty": 1.8, "commercial": 1.8, "performance": 1.8, "similarity": 0.5}
 EDGE_STYLE = {
     "royalty": "solid",
     "commercial": "solid",
     "performance": "solid",
     "similarity": "dashed",
 }
+REL_ORDER = {"royalty": 0, "commercial": 1, "performance": 2, "similarity": 3}
 
 
 def _setup_korean_font() -> None:
-    """Pick a Korean-capable font and force PDF to embed it as TrueType.
-
-    matplotlib's default `pdf.fonttype=3` (Type 3) renders CJK glyphs as
-    paths without proper subsetting — the result looks like boxes or
-    mojibake in PDF viewers. fonttype=42 embeds the TTF, which displays
-    Korean correctly.
-    """
     candidates = (
         "AppleGothic",
         "Apple SD Gothic Neo",
@@ -100,16 +100,13 @@ def _build_real_adjacency(graph):
     for et in REAL_RELATIONS:
         rel = (NODE_TYPE_PROJECT, et, NODE_TYPE_COMPANY)
         ei = graph[rel].edge_index.numpy()
-        srcs, dsts = ei[0].tolist(), ei[1].tolist()
-        for p_idx, c_idx in zip(srcs, dsts):
+        for p_idx, c_idx in zip(ei[0].tolist(), ei[1].tolist()):
             p_adj.setdefault(p_idx, {}).setdefault(et, set()).add(c_idx)
             c_adj.setdefault(c_idx, {}).setdefault(et, set()).add(p_idx)
     return p_adj, c_adj
 
 
 class SimLookup:
-    """Cached top-k cosine similarity lookup per (node_type, index)."""
-
     def __init__(self, project_x: np.ndarray, company_x: np.ndarray, k: int):
         self.k = k
         self.project_x = np.ascontiguousarray(project_x.astype(np.float32))
@@ -144,10 +141,19 @@ def build_neighborhood(
     c_adj: dict,
     sim: SimLookup,
     hops: int = 2,
-) -> nx.MultiDiGraph:
-    G = nx.MultiDiGraph()
+) -> nx.MultiGraph:
+    """Undirected MultiGraph with unique (u, v, rel) triples."""
+    G = nx.MultiGraph()
     seed_key = (seed_type, seed_idx)
     G.add_node(seed_key, type=seed_type, hop=0)
+    seen_edges: set[tuple[frozenset, str]] = set()
+
+    def add_edge_once(u, v, rel, **data):
+        key = (frozenset({u, v}), rel)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        G.add_edge(u, v, rel=rel, **data)
 
     frontier = [seed_key]
     for hop in range(hops):
@@ -167,55 +173,83 @@ def build_neighborhood(
                     if tgt not in G.nodes:
                         G.add_node(tgt, type=other_type, hop=hop + 1)
                         next_frontier.append(tgt)
-                    if not G.has_edge(node, tgt, key=et):
-                        G.add_edge(node, tgt, key=et, rel=et)
+                    add_edge_once(node, tgt, et)
 
             for nbr_idx, score in sim.top_k(nt, idx):
                 tgt = (other_type, nbr_idx)
                 if tgt not in G.nodes:
                     G.add_node(tgt, type=other_type, hop=hop + 1)
                     next_frontier.append(tgt)
-                if not G.has_edge(node, tgt, key="similarity"):
-                    G.add_edge(node, tgt, key="similarity", rel="similarity", weight=score)
+                add_edge_once(node, tgt, "similarity", weight=score)
 
         frontier = next_frontier
     return G
+
+
+def assign_symbols(G: nx.MultiGraph, seed_key) -> dict[tuple, str]:
+    """Stable short symbols: seed=P0/C0; others P1/C1/... by (hop, type, idx)."""
+    symbols: dict[tuple, str] = {}
+    symbols[seed_key] = "P0" if seed_key[0] == NODE_TYPE_PROJECT else "C0"
+
+    others = sorted(
+        (n for n in G.nodes if n != seed_key),
+        key=lambda n: (G.nodes[n]["hop"], n[0], n[1]),
+    )
+    p_n, c_n = 1, 1
+    for node in others:
+        if node[0] == NODE_TYPE_PROJECT:
+            symbols[node] = f"P{p_n}"
+            p_n += 1
+        else:
+            symbols[node] = f"C{c_n}"
+            c_n += 1
+    return symbols
 
 
 def _label(node_type: str, idx: int, project_ids, company_ids, proj_df, comp_df) -> str:
     if node_type == NODE_TYPE_PROJECT:
         pid = project_ids[idx]
         if pid in proj_df.index:
-            name = str(proj_df.at[pid, "과제명"])
-            return (name[:20] + "…") if len(name) > 20 else name
-        return str(pid)[:14]
+            return str(proj_df.at[pid, "과제명"])
+        return str(pid)
     cid = company_ids[idx]
     if cid in comp_df.index:
-        name = str(comp_df.at[cid, "한글업체명"])
-        return (name[:14] + "…") if len(name) > 14 else name
-    return str(cid)[:14]
+        return str(comp_df.at[cid, "한글업체명"])
+    return str(cid)
 
 
-def draw(G: nx.MultiDiGraph, seed_key, ax, project_ids, company_ids, proj_df, comp_df):
+def _truncate(text: str, n: int) -> str:
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def _wrap_name(text: str, width: int) -> str:
+    """Wrap long names to multiple lines so they aren't truncated."""
+    if not text:
+        return ""
+    text = text.replace("\r", " ").replace("\n", " ").strip()
+    lines = textwrap.wrap(
+        text, width=width, break_long_words=True, break_on_hyphens=False,
+    )
+    return "\n".join(lines) if lines else text
+
+
+def draw_graph(G: nx.MultiGraph, seed_key, symbols: dict, ax) -> None:
     if G.number_of_nodes() == 1:
         pos = {seed_key: (0, 0)}
     else:
         try:
-            pos = nx.spring_layout(G, seed=42, k=0.6, iterations=60)
+            pos = nx.spring_layout(G, seed=42, k=0.9, iterations=80)
         except Exception:
             pos = nx.random_layout(G, seed=42)
 
     for rel in ("similarity", "performance", "commercial", "royalty"):
-        edges = [
-            (u, v) for u, v, d in G.edges(data=True) if d.get("rel") == rel
-        ]
+        edges = [(u, v) for u, v, d in G.edges(data=True) if d.get("rel") == rel]
         if not edges:
             continue
         nx.draw_networkx_edges(
             G, pos, edgelist=edges, ax=ax,
             edge_color=EDGE_COLOR[rel], width=EDGE_WIDTH[rel],
-            style=EDGE_STYLE[rel], alpha=0.55, arrows=True,
-            connectionstyle="arc3,rad=0.08",
+            style=EDGE_STYLE[rel], alpha=0.6,
         )
 
     for node, attrs in G.nodes(data=True):
@@ -223,37 +257,124 @@ def draw(G: nx.MultiDiGraph, seed_key, ax, project_ids, company_ids, proj_df, co
         hop = attrs.get("hop", 2)
         color = "#9ecae1" if nt == NODE_TYPE_PROJECT else "#fcae91"
         if node == seed_key:
-            size, ec, lw = 1400, "#d62728", 3
+            size, ec, lw = 700, "#d62728", 2.2
         elif hop == 1:
-            size, ec, lw = 550, "black", 1.2
+            size, ec, lw = 320, "black", 1.0
         else:
-            size, ec, lw = 170, "#888888", 0.6
+            size, ec, lw = 150, "#888888", 0.5
         nx.draw_networkx_nodes(
             G, pos, nodelist=[node], ax=ax,
             node_color=color, node_size=size,
             edgecolors=ec, linewidths=lw,
         )
 
-    labels = {
-        node: _label(node[0], node[1], project_ids, company_ids, proj_df, comp_df)
-        for node, attrs in G.nodes(data=True)
-        if attrs.get("hop", 2) <= 1
-    }
-    nx.draw_networkx_labels(G, pos, labels, ax=ax, font_size=7)
+    nx.draw_networkx_labels(
+        G, pos, {n: symbols[n] for n in G.nodes}, ax=ax, font_size=5.5,
+    )
 
     legend_handles = [
         Line2D([0], [0], marker="o", color="w",
-               markerfacecolor="#9ecae1", markersize=10, label="Project"),
+               markerfacecolor="#9ecae1", markersize=8, label="Project"),
         Line2D([0], [0], marker="o", color="w",
-               markerfacecolor="#fcae91", markersize=10, label="Company"),
-        Line2D([0], [0], color=EDGE_COLOR["royalty"], lw=2, label="royalty"),
-        Line2D([0], [0], color=EDGE_COLOR["commercial"], lw=2, label="commercial"),
-        Line2D([0], [0], color=EDGE_COLOR["performance"], lw=2, label="performance"),
+               markerfacecolor="#fcae91", markersize=8, label="Company"),
+        Line2D([0], [0], color=EDGE_COLOR["royalty"], lw=1.8, label="royalty"),
+        Line2D([0], [0], color=EDGE_COLOR["commercial"], lw=1.8, label="commercial"),
+        Line2D([0], [0], color=EDGE_COLOR["performance"], lw=1.8, label="performance"),
         Line2D([0], [0], color=EDGE_COLOR["similarity"], lw=0.8,
-               linestyle="--", label="similarity (top-5)"),
+               linestyle="--", label="similarity"),
     ]
-    ax.legend(handles=legend_handles, loc="upper left", fontsize=8, frameon=True)
+    ax.legend(handles=legend_handles, loc="upper left", fontsize=6.5, frameon=True)
     ax.set_axis_off()
+
+
+def _node_table_font_size(n_rows: int) -> float:
+    return float(max(4.0, min(9.0, 22.0 * 18 / max(n_rows, 1) ** 0.85)))
+
+
+def _node_table_row_height(n_rows: int) -> float:
+    return float(max(0.6, min(1.5, 50.0 / max(n_rows, 1))))
+
+
+def draw_node_table(
+    G: nx.MultiGraph, symbols: dict, seed_key, ax,
+    project_ids, company_ids, proj_df, comp_df,
+    wrap_width: int = 34,
+) -> None:
+    ax.set_axis_off()
+    rows = []
+    ordered = [seed_key] + sorted(
+        (n for n in G.nodes if n != seed_key),
+        key=lambda n: (int(symbols[n][1:]), n[0]),
+    )
+    for node in ordered:
+        sym = symbols[node]
+        if node == seed_key:
+            sym = f"★ {sym}"
+        nt_display = "Project" if node[0] == NODE_TYPE_PROJECT else "Company"
+        name = _label(node[0], node[1], project_ids, company_ids, proj_df, comp_df)
+        rows.append([sym, nt_display, _wrap_name(name, wrap_width)])
+
+    if not rows:
+        return
+
+    max_lines = max((r[2].count("\n") + 1) for r in rows)
+    table = ax.table(
+        cellText=rows,
+        colLabels=["Symbol", "Type", "Name"],
+        loc="upper center",
+        cellLoc="left",
+        colLoc="left",
+        colWidths=[0.10, 0.15, 0.75],
+    )
+    table.auto_set_font_size(False)
+    fs = _node_table_font_size(len(rows) + 1)
+    table.set_fontsize(fs)
+
+    base_h = _node_table_row_height(len(rows) + 1)
+    table.scale(1.0, base_h)
+    for i, row in enumerate(rows, start=1):
+        lines = max(1, row[2].count("\n") + 1)
+        if lines > 1:
+            for j in range(3):
+                cell = table[(i, j)]
+                cell.set_height(cell.get_height() * lines)
+
+    for j in range(3):
+        cell = table[(0, j)]
+        cell.set_facecolor("#eaeaea")
+        cell.set_text_props(weight="bold")
+    for i, node in enumerate(ordered, start=1):
+        if node == seed_key:
+            for j in range(3):
+                table[(i, j)].set_facecolor("#fff2cc")
+
+    ax.set_title(f"Nodes ({len(rows)})", fontsize=10, loc="left", pad=4)
+
+
+def render_page(
+    pdf, G, seed_key, seed_label: str, score: float,
+    project_ids, company_ids, proj_df, comp_df,
+) -> None:
+    symbols = assign_symbols(G, seed_key)
+
+    fig = plt.figure(figsize=(16, 10))
+    gs = GridSpec(1, 2, figure=fig, width_ratios=[1.0, 1.0], wspace=0.05)
+    ax_graph = fig.add_subplot(gs[0, 0])
+    ax_nodes = fig.add_subplot(gs[0, 1])
+
+    draw_graph(G, seed_key, symbols, ax_graph)
+    draw_node_table(G, symbols, seed_key, ax_nodes,
+                    project_ids, company_ids, proj_df, comp_df)
+
+    seed_sym = symbols[seed_key]
+    nt_display = "Project" if seed_key[0] == NODE_TYPE_PROJECT else "Company"
+    fig.suptitle(
+        f"{nt_display} seed [{seed_sym}]: {_truncate(seed_label, 50)}  "
+        f"|  score={score:.3f}  |V|={G.number_of_nodes()}  |E|={G.number_of_edges()}",
+        fontsize=11, y=0.995,
+    )
+    pdf.savefig(fig, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main():
@@ -263,7 +384,7 @@ def main():
     parser.add_argument("--output", default="data/processed/graph_viz.pdf")
     parser.add_argument("--top-n", type=int, default=10,
                         help="top-N seeds per side (default 10 → 20 pages)")
-    parser.add_argument("--sim-k", type=int, default=5,
+    parser.add_argument("--sim-k", type=int, default=3,
                         help="max similarity edges retained per node")
     parser.add_argument("--hops", type=int, default=2)
     args = parser.parse_args()
@@ -287,7 +408,6 @@ def main():
     project_ids: list = nm["project_ids"]
     company_ids: list = nm["company_ids"]
 
-    print(f"[viz] loading raw project/company pickles for names & scores")
     proj_id_col = paths["id_columns"]["project"]
     comp_id_col = paths["id_columns"]["company"]
     proj_df = pd.read_pickle(paths["raw"]["projects"]).set_index(proj_id_col)
@@ -319,41 +439,25 @@ def main():
         page = 0
         for pid, row in top_projects.iterrows():
             if pid not in proj_id_to_idx:
-                print(f"  skipping project {pid} (not in graph)")
                 continue
             idx = proj_id_to_idx[pid]
             page += 1
             lbl = _label(NODE_TYPE_PROJECT, idx, project_ids, company_ids, proj_df, comp_df)
-            print(f"  [{page:2d}] project {lbl} (score={row['유망성점수']:.3f})")
+            print(f"  [{page:2d}] project {_truncate(lbl, 30)} (score={row['유망성점수']:.3f})")
             G = build_neighborhood(idx, NODE_TYPE_PROJECT, p_adj, c_adj, sim, hops=args.hops)
-            fig, ax = plt.subplots(figsize=(14, 10))
-            draw(G, (NODE_TYPE_PROJECT, idx), ax, project_ids, company_ids, proj_df, comp_df)
-            ax.set_title(
-                f"Project seed: {lbl}  |  score={row['유망성점수']:.3f}  "
-                f"|V|={G.number_of_nodes()}  |E|={G.number_of_edges()}",
-                fontsize=11,
-            )
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
+            render_page(pdf, G, (NODE_TYPE_PROJECT, idx), lbl, float(row["유망성점수"]),
+                        project_ids, company_ids, proj_df, comp_df)
 
         for cid, row in top_companies.iterrows():
             if cid not in comp_id_to_idx:
-                print(f"  skipping company {cid} (not in graph)")
                 continue
             idx = comp_id_to_idx[cid]
             page += 1
             lbl = _label(NODE_TYPE_COMPANY, idx, project_ids, company_ids, proj_df, comp_df)
-            print(f"  [{page:2d}] company {lbl} (score={row['유망성점수']:.3f})")
+            print(f"  [{page:2d}] company {_truncate(lbl, 30)} (score={row['유망성점수']:.3f})")
             G = build_neighborhood(idx, NODE_TYPE_COMPANY, p_adj, c_adj, sim, hops=args.hops)
-            fig, ax = plt.subplots(figsize=(14, 10))
-            draw(G, (NODE_TYPE_COMPANY, idx), ax, project_ids, company_ids, proj_df, comp_df)
-            ax.set_title(
-                f"Company seed: {lbl}  |  score={row['유망성점수']:.3f}  "
-                f"|V|={G.number_of_nodes()}  |E|={G.number_of_edges()}",
-                fontsize=11,
-            )
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
+            render_page(pdf, G, (NODE_TYPE_COMPANY, idx), lbl, float(row["유망성점수"]),
+                        project_ids, company_ids, proj_df, comp_df)
 
     print(f"[viz] done: {page} pages saved to {output}")
 
