@@ -47,9 +47,12 @@ def main() -> None:
     parser.add_argument("--no-components", type=int, default=64)
     parser.add_argument("--topk", type=int, default=100)
     parser.add_argument("--limit-queries", type=int, default=None)
-    parser.add_argument("--use-identity", action="store_true",
-                        help="add identity features per node (heavy memory; "
-                             "skip it to get a feature-only hybrid)")
+    parser.add_argument(
+        "--identity-mode",
+        default="none",
+        choices=["none", "warm", "all"],
+        help="identity features scope: none | warm (only nodes with edges) | all",
+    )
     parser.add_argument("--loss", default="warp", choices=["warp", "bpr", "logistic"])
     args = parser.parse_args()
 
@@ -73,13 +76,13 @@ def main() -> None:
     cfg = LightFMConfig(
         no_components=args.no_components,
         epochs=args.epochs,
-        use_identity=args.use_identity,
+        identity_mode=args.identity_mode,
         loss=args.loss,
     )
     model = LightFMBaseline(cfg)
     print(
         f"[lightfm] fitting: no_components={cfg.no_components} "
-        f"epochs={cfg.epochs} use_identity={cfg.use_identity}"
+        f"epochs={cfg.epochs} identity_mode={cfg.identity_mode} loss={cfg.loss}"
     )
     model.fit(project_x, company_x, train_edges, relation_weights)
 
