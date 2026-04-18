@@ -1,9 +1,12 @@
 PY ?= python
 
-.PHONY: data similarity visualize compress-graph decompress-graph train train-coldstart index eval infer test lint baseline-two-tower baseline-cf baseline-lightfm
+.PHONY: data merge-projects similarity visualize compress-graph decompress-graph train train-coldstart index eval infer test lint baseline-two-tower baseline-cf baseline-lightfm
 
 data:
 	$(PY) scripts/build_graph.py
+
+merge-projects:
+	$(PY) scripts/merge_multiyear_projects.py
 
 similarity:
 	$(PY) scripts/build_similarity.py
