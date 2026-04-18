@@ -131,9 +131,12 @@ def main() -> None:
     )
 
     output.parent.mkdir(parents=True, exist_ok=True)
+    # Node counts comfortably fit in int32 (~2.1B max). Cast to halve disk
+    # size vs int64; loaders cast back when PyG requires int64 edge_index.
+    edge_index_i32 = result.edge_index.astype(np.int32)
     np.savez(
         output,
-        edge_index=result.edge_index,
+        edge_index=edge_index_i32,
         topk=np.int64(topk),
         direction=np.array(direction, dtype="<U10"),
         drop_overlap=np.bool_(drop_overlap),
