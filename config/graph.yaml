@@ -12,11 +12,30 @@ edge_types:
     priority: 4
     weight: 0.25
 
+# (1) 양방향 메시지 패싱을 위해 reverse edge 추가
+reverse_edges:
+  enabled: true
+
+# (2) 간선 타입별 weight를 edge_attr로 저장 → weighted loss/메시지 가중 양쪽에서 사용
+edge_weights_as_attr: true
+
+# (4) held-out split은 그래프 빌드 시점에 고정 (leakage 방지 + 재현성)
+held_out:
+  enabled: true
+  ratio: 0.1
+  seed: 42
+  per_edge_type: true
+  apply_to: [royalty, commercial, performance]  # similarity는 평가 대상 아님
+
+# (3) 유사도 간선 — 아래 "Recommendation" 참고
 similarity_edges:
   enabled: true
-  top_percent: 0.01
-  direction: both
+  mode: topk                 # topk | top_percent
+  topk: 100                  # mode=topk일 때 사용
+  top_percent: 0.01          # mode=top_percent일 때 사용
+  direction: both            # 과제→기업, 기업→과제 양쪽에서 뽑아 union
   drop_overlap_with_known_edges: true
+  cache_path: data/processed/sim_edges.npz  # 별도 캐시 (base 그래프와 분리)
 
 duplicate_policy: heterogeneous
 

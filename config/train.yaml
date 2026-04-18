@@ -7,8 +7,8 @@ gnn:
   weight_decay: 1.0e-5
   num_neg_samples: 5
   loss: weighted_bpr
-  held_out_ratio: 0.1
   early_stopping_patience: 5
+  # held_out split은 graph.yaml에서 관리 (빌드 시점에 그래프 아티팩트와 함께 고정)
 
 projection_mlp:
   epochs: 50

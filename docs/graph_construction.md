@@ -11,9 +11,10 @@
 2. **노드 피처**: `norm_embed`를 float32로 캐스팅, `(N, D)` 행렬로 스택.
 3. **간선 로드**: 각 간선 파일에서 `(project_id, company_id)` 쌍만 추출, 중복 제거.
 4. **간선 인덱싱**: NodeMap에 존재하는 쌍만 남기고 index 공간으로 변환.
-5. **유사도 간선**: 각 과제→기업 top-1%, 각 기업→과제 top-1%를 뽑아 union. 기존 3종 간선과의 중복은 `drop_overlap_with_known_edges` 플래그에 따라 제거.
-6. **HeteroData 빌드**: PyG `HeteroData`에 4개 edge type을 각자의 relation key로 저장. 양방향 필요 시 reverse edge를 추가.
-7. **저장**: `data/processed/graph.pt`.
+5. **Held-out split**: royalty / commercial / performance 각 관계에서 `held_out.ratio` 비율을 seed 고정하여 분리. 학습 그래프에서는 제거, 별도 파일 `data/processed/held_out.pt`로 저장.
+6. **유사도 간선 (분리 캐시)**: 별도 스크립트에서 top-k 또는 top-% 유사도 간선을 계산하여 `data/processed/sim_edges.npz`로 저장. 기존 3종 간선과의 중복은 `drop_overlap_with_known_edges` 플래그에 따라 제거. Base 그래프와 분리되어 있어 top-k 파라미터 스윕 시 base 재빌드 불필요.
+7. **HeteroData 빌드 (base)**: PyG `HeteroData`에 3종 실제 관계를 relation key로 저장. `edge_weights_as_attr=true`면 간선 타입 weight를 `edge_attr`로 기록. `reverse_edges.enabled=true`면 reverse 관계도 추가.
+8. **저장**: `data/processed/graph.pt` (base graph). 학습 시점에 config flag로 유사도 캐시를 로드하여 merge.
 
 ## 불변식
 - 과제-과제 / 기업-기업 간선은 **생성 금지**.
