@@ -1,7 +1,7 @@
 gnn:
-  type: HGT
+  type: sage
   input_dim: null
-  hidden_dim: 256
+  hidden_dim: 128
   output_dim: 128
   num_layers: 2
   num_heads: 4
