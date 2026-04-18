@@ -40,6 +40,66 @@ from src.training.trainer import train_encoder
 from src.utils import load_yaml, set_seed
 
 REAL_EDGE_TYPES = (EDGE_ROYALTY, EDGE_COMMERCIAL, EDGE_PERFORMANCE)
+SIM_EDGE_TYPE = "similarity"
+
+
+def _attach_similarity_edges(graph, graph_cfg: dict, override_path: str | None) -> None:
+    """Load sim_edges.npz and add (project, similarity, company) + reverse.
+
+    Similarity edges are added for **message passing only**. They are not
+    used as training positives — the BPR sampler still draws from the
+    three real relations (royalty/commercial/performance).
+    """
+    sim_cfg = graph_cfg.get("similarity_edges", {}) or {}
+    default_path = sim_cfg.get("cache_path") or "data/processed/sim_edges.npz"
+    sim_path = Path(override_path or default_path)
+    if not sim_path.exists():
+        raise FileNotFoundError(
+            f"similarity cache not found: {sim_path}. "
+            f"Run scripts/build_similarity.py first."
+        )
+
+    print(f"[train_gnn] loading similarity edges {sim_path}")
+    z = np.load(sim_path)
+    ei = np.ascontiguousarray(z["edge_index"]).astype(np.int64)
+
+    n_p_file = int(z["n_project"])
+    n_c_file = int(z["n_company"])
+    n_p_graph = graph[NODE_TYPE_PROJECT].num_nodes
+    n_c_graph = graph[NODE_TYPE_COMPANY].num_nodes
+    if (n_p_file, n_c_file) != (n_p_graph, n_c_graph):
+        raise ValueError(
+            f"sim_edges dimensions ({n_p_file}, {n_c_file}) do not match "
+            f"graph ({n_p_graph}, {n_c_graph}); rebuild similarity for this graph."
+        )
+
+    edge_index = torch.from_numpy(ei)
+    rel = (NODE_TYPE_PROJECT, SIM_EDGE_TYPE, NODE_TYPE_COMPANY)
+    graph[rel].edge_index = edge_index
+
+    weights_as_attr = bool(graph_cfg.get("edge_weights_as_attr", True))
+    sim_weight = float(
+        graph_cfg.get("edge_types", {}).get(SIM_EDGE_TYPE, {}).get("weight", 0.25)
+    )
+    if weights_as_attr:
+        graph[rel].edge_weight = torch.full(
+            (edge_index.shape[1],), fill_value=sim_weight, dtype=torch.float32
+        )
+
+    add_reverse = bool(graph_cfg.get("reverse_edges", {}).get("enabled", True))
+    if add_reverse:
+        rev_rel = (NODE_TYPE_COMPANY, f"rev_{SIM_EDGE_TYPE}", NODE_TYPE_PROJECT)
+        rev_ei = edge_index.flip(0).contiguous()
+        graph[rev_rel].edge_index = rev_ei
+        if weights_as_attr:
+            graph[rev_rel].edge_weight = torch.full(
+                (rev_ei.shape[1],), fill_value=sim_weight, dtype=torch.float32
+            )
+
+    print(
+        f"[train_gnn] added similarity edges: |E|={edge_index.shape[1]:,}  "
+        f"weight={sim_weight}  reverse={add_reverse}"
+    )
 
 
 def _training_edges(graph) -> dict[str, np.ndarray]:
@@ -161,6 +221,16 @@ def main() -> None:
         "--resume", default=None,
         help="path to a model_*.pt checkpoint; continues optimizer + epoch counter",
     )
+    parser.add_argument(
+        "--with-similarity", action="store_true",
+        help="inject (project, similarity, company) edges from sim_edges.npz into the graph "
+             "for message passing. Training loss still targets royalty/commercial/performance only.",
+    )
+    parser.add_argument(
+        "--sim-path", default=None,
+        help="override sim_edges.npz location (default: graph_cfg.similarity_edges.cache_path "
+             "or data/processed/sim_edges.npz)",
+    )
     args = parser.parse_args()
 
     paths = load_yaml(args.paths)
@@ -183,6 +253,9 @@ def main() -> None:
         if x is not None and x.dtype != torch.float32:
             print(f"[train_gnn] casting {nt}.x {x.dtype} -> torch.float32")
             graph[nt].x = x.float()
+
+    if args.with_similarity:
+        _attach_similarity_edges(graph, graph_cfg, args.sim_path)
 
     layer_type = (args.layer_type or model_cfg["gnn"].get("type", "sage")).lower()
     gnn_cfg = model_cfg["gnn"]
