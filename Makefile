@@ -1,9 +1,15 @@
 PY ?= python
 
-.PHONY: data train train-coldstart index eval infer test lint baseline-two-tower baseline-cf baseline-lightfm
+.PHONY: data compress-graph decompress-graph train train-coldstart index eval infer test lint baseline-two-tower baseline-cf baseline-lightfm
 
 data:
 	$(PY) scripts/build_graph.py
+
+compress-graph:
+	$(PY) scripts/compress_graph.py
+
+decompress-graph:
+	$(PY) scripts/compress_graph.py --mode decompress --input data/processed/graph_fp16.pt
 
 train:
 	$(PY) scripts/train_gnn.py
