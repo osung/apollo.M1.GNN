@@ -1,9 +1,9 @@
 raw:
-  projects: data/raw/public_RnD_embeddings_pro_260324.pkl
-  companies: data/raw/company_embeddings_pro_0925_260324.pkl
-  edges_royalty: data/raw/df_pr_royalty_260417_valid_biz.pkl
-  edges_commercial: data/raw/df_pr_commercial_260417_valid_biz.pkl
-  edges_performance: data/raw/df_project_bizno_valid.pkl
+  projects: data/raw_merged/public_RnD_embeddings_pro_260324.pkl
+  companies: data/raw_merged/company_embeddings_pro_0925_260324.pkl
+  edges_royalty: data/raw_merged/df_pr_royalty_260417_valid_biz.pkl
+  edges_commercial: data/raw_merged/df_pr_commercial_260417_valid_biz.pkl
+  edges_performance: data/raw_merged/df_project_bizno_valid.pkl
 
 processed:
   graph: data/processed/graph.pt
