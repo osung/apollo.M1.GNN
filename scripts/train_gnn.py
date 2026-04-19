@@ -185,6 +185,8 @@ def main() -> None:
     parser.add_argument("--hidden-dim", type=int, default=None)
     parser.add_argument("--output-dim", type=int, default=None)
     parser.add_argument("--num-layers", type=int, default=None)
+    parser.add_argument("--num-heads", type=int, default=None,
+                        help="attention heads for gat/hgt (overrides model.yaml)")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--topk", type=int, default=100)
@@ -268,7 +270,7 @@ def main() -> None:
         num_layers=int(args.num_layers or gnn_cfg["num_layers"]),
         metadata=graph.metadata(),
         layer_type=layer_type,
-        num_heads=int(gnn_cfg.get("num_heads", 4)),
+        num_heads=int(args.num_heads or gnn_cfg.get("num_heads", 4)),
         dropout=float(gnn_cfg.get("dropout", 0.1)),
     )
     # PyG lazy layers (SAGEConv/GATConv with in_channels=-1) need one forward
