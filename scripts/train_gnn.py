@@ -265,6 +265,12 @@ def main() -> None:
         "--num-neg", type=int, default=None,
         help="override train.yaml gnn.num_neg_samples",
     )
+    parser.add_argument(
+        "--no-normalize", action="store_true",
+        help="disable L2 normalization of encoder output. Frees the BPR "
+             "score from the [-1, 1] bound so hard negatives can keep "
+             "providing gradient; FAISS inner-product retrieval still works.",
+    )
     args = parser.parse_args()
 
     paths = load_yaml(args.paths)
@@ -304,13 +310,17 @@ def main() -> None:
         layer_type=layer_type,
         num_heads=int(args.num_heads or gnn_cfg.get("num_heads", 4)),
         dropout=float(gnn_cfg.get("dropout", 0.1)),
+        normalize_output=not args.no_normalize,
     )
     # PyG lazy layers (SAGEConv/GATConv with in_channels=-1) need one forward
     # pass to materialize parameter shapes before anything reads .parameters().
     with torch.no_grad():
         model(graph.x_dict, graph.edge_index_dict)
     n_params = sum(p.numel() for p in model.parameters() if not p.__class__.__name__.startswith("Uninit"))
-    print(f"[train_gnn] layer_type={layer_type}  params={n_params:,}")
+    print(
+        f"[train_gnn] layer_type={layer_type}  params={n_params:,}  "
+        f"normalize_output={model.normalize_output}"
+    )
 
     tr_cfg = train_cfg["gnn"]
     epochs = args.epochs or int(tr_cfg["epochs"])

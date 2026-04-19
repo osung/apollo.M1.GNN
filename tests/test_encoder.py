@@ -53,6 +53,24 @@ def test_encoder_output_is_l2_normalized():
         assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5)
 
 
+def test_encoder_normalize_output_false_leaves_raw_scale():
+    g = _toy_graph()
+    enc = GNNEncoder(
+        input_dim=16, hidden_dim=32, output_dim=8, num_layers=2,
+        metadata=g.metadata(), layer_type="sage",
+        normalize_output=False,
+    )
+    z = enc(g.x_dict, g.edge_index_dict)
+    # Should NOT all be unit-norm; at least one row should differ.
+    all_unit = True
+    for v in z.values():
+        norms = v.norm(dim=-1)
+        if not torch.allclose(norms, torch.ones_like(norms), atol=1e-3):
+            all_unit = False
+            break
+    assert not all_unit
+
+
 def test_encoder_unknown_layer_type_raises():
     g = _toy_graph()
     with pytest.raises(ValueError):

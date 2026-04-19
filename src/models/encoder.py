@@ -75,11 +75,13 @@ class GNNEncoder(nn.Module):
         layer_type: str = "sage",
         num_heads: int = 4,
         dropout: float = 0.1,
+        normalize_output: bool = True,
         node_types: Iterable[str] = ("project", "company"),
     ):
         super().__init__()
         self.layer_type = layer_type
         self.dropout = dropout
+        self.normalize_output = normalize_output
         self.node_types = tuple(node_types)
 
         self.input_proj = nn.ModuleDict(
@@ -107,7 +109,8 @@ class GNNEncoder(nn.Module):
             if self.training and self.dropout > 0:
                 h_dict = {k: F.dropout(h, p=self.dropout) for k, h in h_dict.items()}
         z_dict = {nt: self.output_proj[nt](h_dict[nt]) for nt in self.node_types}
-        z_dict = {k: F.normalize(z, p=2, dim=-1) for k, z in z_dict.items()}
+        if self.normalize_output:
+            z_dict = {k: F.normalize(z, p=2, dim=-1) for k, z in z_dict.items()}
         return z_dict
 
     @torch.no_grad()
