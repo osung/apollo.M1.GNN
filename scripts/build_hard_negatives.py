@@ -8,21 +8,23 @@ unrelated. These are safer hard negatives than "content-similar and
 simply unobserved", because we have positive evidence (not just absence
 of observation) that they don't belong together.
 
-Pipeline per query project `p`:
-    1. Collect candidate companies from sim_edges_top-100 that pair with `p`.
-    2. Drop known positives (including held-out ones).
-    3. Score each remaining candidate by:
-           unrelatedness(p, c) = 1
-             - w_keyword  * Jaccard(kw_p, kw_c)
-             - w_industry * 1{kw_p ∩ tokens(industry_c) != ∅}
-             - w_name     * Jaccard(char_bigrams(name_p), char_bigrams(name_c))
-    4. Take top-`topk` highest-unrelatedness pairs.
+Direction
+---------
+- `p2c`: query = project, candidates = companies. Output oriented
+         (project_idx, company_idx).
+- `c2p`: query = company, candidates = projects. Output oriented
+         (company_idx, project_idx). Use this when a symmetric or
+         c→p training loop needs per-company hard-negative pools.
+
+Unrelatedness is always computed over the (project, company) pair
+regardless of direction — the direction flag only changes who is the
+query and how the output is oriented.
 
 Output
 ------
 npz with fields:
-    edge_index: (2, E) int32, orientation (project_idx, company_idx)
-    topk, w_kw, w_ind, w_name: scalar metadata
+    edge_index: (2, E) int32, row 0 = query idx, row 1 = candidate idx
+    direction, topk, w_kw, w_ind, w_name: scalar metadata
     n_projects, n_companies: graph dimensions
 """
 from __future__ import annotations
@@ -101,8 +103,23 @@ def _build_feature_lookup(df, idx_col: str, node_ids: list, columns: list[str]) 
     return tables
 
 
+def _score_unrelatedness(
+    p_idx: int, c_idx: int,
+    project_kws, company_kws, project_ngrams, company_ngrams, company_industry,
+    w_kw: float, w_ind: float, w_name: float,
+) -> float:
+    kw_p = project_kws[p_idx]
+    kw_c = company_kws[c_idx]
+    j_kw = _jaccard(kw_p, kw_c)
+    ind_c = company_industry[c_idx]
+    ind_hit = 1.0 if (kw_p and ind_c and (kw_p & ind_c)) else 0.0
+    j_name = _jaccard(project_ngrams[p_idx], company_ngrams[c_idx])
+    return 1.0 - w_kw * j_kw - w_ind * ind_hit - w_name * j_name
+
+
 def mine_hard_negatives(
     sim_ei: np.ndarray,
+    direction: str,
     n_projects: int,
     n_companies: int,
     project_kws: list,
@@ -116,17 +133,27 @@ def mine_hard_negatives(
     w_ind: float,
     w_name: float,
 ) -> tuple[np.ndarray, dict]:
-    # Group candidates by source project
-    print(f"[hardneg] grouping {sim_ei.shape[1]:,} sim edges by project ...")
-    per_project: dict[int, list[int]] = defaultdict(list)
-    src = sim_ei[0]
-    dst = sim_ei[1]
-    for p, c in zip(src.tolist(), dst.tolist()):
-        per_project[int(p)].append(int(c))
+    if direction not in ("p2c", "c2p"):
+        raise ValueError(f"direction must be p2c or c2p, got {direction!r}")
 
-    candidate_counts = [len(v) for v in per_project.values()]
+    query_label = "project" if direction == "p2c" else "company"
+    n_queries = n_projects if direction == "p2c" else n_companies
+
+    # Group candidates by query side.
+    print(f"[hardneg] grouping {sim_ei.shape[1]:,} sim edges by {query_label} ...")
+    per_query: dict[int, list[int]] = defaultdict(list)
+    row0 = sim_ei[0].tolist()
+    row1 = sim_ei[1].tolist()
+    if direction == "p2c":
+        for p, c in zip(row0, row1):
+            per_query[int(p)].append(int(c))
+    else:
+        for p, c in zip(row0, row1):
+            per_query[int(c)].append(int(p))
+
+    candidate_counts = [len(v) for v in per_query.values()]
     print(
-        f"[hardneg] {len(per_project):,} projects with candidates  "
+        f"[hardneg] {len(per_query):,} {query_label}s with candidates  "
         f"(avg {np.mean(candidate_counts):.1f}, median {int(np.median(candidate_counts))}, "
         f"max {max(candidate_counts)})"
     )
@@ -138,45 +165,51 @@ def mine_hard_negatives(
     n_skipped_nocand = 0
     n_skipped_allpos = 0
 
-    for p_idx in range(n_projects):
-        cand = per_project.get(p_idx)
+    for q_idx in range(n_queries):
+        cand = per_query.get(q_idx)
         if not cand:
             n_skipped_nocand += 1
             continue
-        pos = positive_map.get(p_idx, set())
-        cand = [c for c in set(cand) if c not in pos]
+        pos = positive_map.get(q_idx, set())
+        cand = [x for x in set(cand) if x not in pos]
         if not cand:
             n_skipped_allpos += 1
             continue
 
-        kw_p = project_kws[p_idx]
-        ng_p = project_ngrams[p_idx]
-
         scores = np.empty(len(cand), dtype=np.float32)
-        for i, c in enumerate(cand):
-            j_kw = _jaccard(kw_p, company_kws[c])
-            ind_c = company_industry[c]
-            ind_hit = 1.0 if (kw_p and ind_c and (kw_p & ind_c)) else 0.0
-            j_name = _jaccard(ng_p, company_ngrams[c])
-            scores[i] = 1.0 - w_kw * j_kw - w_ind * ind_hit - w_name * j_name
+        for i, other in enumerate(cand):
+            if direction == "p2c":
+                scores[i] = _score_unrelatedness(
+                    q_idx, other, project_kws, company_kws,
+                    project_ngrams, company_ngrams, company_industry,
+                    w_kw, w_ind, w_name,
+                )
+            else:  # c2p: q_idx is company, other is project
+                scores[i] = _score_unrelatedness(
+                    other, q_idx, project_kws, company_kws,
+                    project_ngrams, company_ngrams, company_industry,
+                    w_kw, w_ind, w_name,
+                )
 
         k = min(topk, len(cand))
-        top_idx = np.argpartition(-scores, kth=k - 1)[:k] if k < len(cand) else np.arange(len(cand))
-        # Sort top-k desc by score
+        if k < len(cand):
+            top_idx = np.argpartition(-scores, kth=k - 1)[:k]
+        else:
+            top_idx = np.arange(len(cand))
         top_idx = top_idx[np.argsort(-scores[top_idx])]
 
         for idx in top_idx:
-            hard_src.append(p_idx)
+            hard_src.append(q_idx)
             hard_dst.append(cand[idx])
 
         n_processed += 1
         if n_processed % 20_000 == 0:
             elapsed = time.perf_counter() - t0
             rate = n_processed / elapsed
-            eta = (n_projects - n_processed) / max(rate, 1e-9)
+            eta = (n_queries - n_processed) / max(rate, 1e-9)
             print(
-                f"[hardneg] {n_processed:,}/{n_projects:,} "
-                f"({n_processed/n_projects*100:.1f}%)  "
+                f"[hardneg] {n_processed:,}/{n_queries:,} "
+                f"({n_processed/n_queries*100:.1f}%)  "
                 f"{rate:.0f}/s  ETA {eta:.0f}s"
             )
 
@@ -188,10 +221,11 @@ def mine_hard_negatives(
         axis=0,
     )
     stats = {
+        "direction": direction,
         "n_pairs": int(edge_index.shape[1]),
-        "n_projects_processed": n_processed,
-        "n_projects_no_candidates": n_skipped_nocand,
-        "n_projects_all_positive": n_skipped_allpos,
+        f"n_{query_label}s_processed": n_processed,
+        f"n_{query_label}s_no_candidates": n_skipped_nocand,
+        f"n_{query_label}s_all_positive": n_skipped_allpos,
         "elapsed_s": time.perf_counter() - t0,
     }
     return edge_index, stats
@@ -201,13 +235,21 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--paths", default="config/paths.yaml")
     parser.add_argument("--sim-path", default="data/processed/sim_edges_top100.npz")
-    parser.add_argument("--output", default="data/processed/hard_negatives_p2c.npz")
+    parser.add_argument("--output", default=None,
+                        help="output npz path (default: hard_negatives_<direction>.npz "
+                             "next to sim file)")
+    parser.add_argument("--direction", default="p2c", choices=["p2c", "c2p"])
     parser.add_argument("--topk", type=int, default=20)
     parser.add_argument("--w-keyword", type=float, default=0.5)
     parser.add_argument("--w-industry", type=float, default=0.3)
     parser.add_argument("--w-name", type=float, default=0.2)
     parser.add_argument("--graph-path", default=None)
     args = parser.parse_args()
+
+    if args.output is None:
+        args.output = str(
+            Path(args.sim_path).with_name(f"hard_negatives_{args.direction}.npz")
+        )
 
     paths = load_yaml(args.paths)
 
@@ -261,25 +303,33 @@ def main():
     print(f"[hardneg] loading graph for positive filter: {graph_path}")
     graph = torch.load(graph_path, weights_only=False)
     positive_map: dict[int, set[int]] = defaultdict(set)
+
+    def _add_positives(edges: np.ndarray):
+        for p, c in zip(edges[0].tolist(), edges[1].tolist()):
+            if args.direction == "p2c":
+                positive_map[int(p)].add(int(c))
+            else:  # c2p: key by company, values are projects
+                positive_map[int(c)].add(int(p))
+
     for et in REAL_RELATIONS:
         rel = (NODE_TYPE_PROJECT, et, NODE_TYPE_COMPANY)
-        ei = graph[rel].edge_index.numpy()
-        for p, c in zip(ei[0].tolist(), ei[1].tolist()):
-            positive_map[int(p)].add(int(c))
+        _add_positives(graph[rel].edge_index.numpy())
     held_out_path = Path(graph_path).with_name("held_out.pt")
     if held_out_path.exists():
         ho = torch.load(held_out_path, weights_only=False)
         for et in REAL_RELATIONS:
             rel = (NODE_TYPE_PROJECT, et, NODE_TYPE_COMPANY)
-            ei = ho[rel].edge_index.numpy()
-            for p, c in zip(ei[0].tolist(), ei[1].tolist()):
-                positive_map[int(p)].add(int(c))
-    print(f"[hardneg]   {sum(len(v) for v in positive_map.values()):,} positives across "
-          f"{len(positive_map):,} projects")
+            _add_positives(ho[rel].edge_index.numpy())
+    query_side = "projects" if args.direction == "p2c" else "companies"
+    print(
+        f"[hardneg]   {sum(len(v) for v in positive_map.values()):,} positive pairs across "
+        f"{len(positive_map):,} {query_side}"
+    )
 
     # 5. mine
     edge_index, stats = mine_hard_negatives(
         sim_ei=sim_ei,
+        direction=args.direction,
         n_projects=N_p,
         n_companies=N_c,
         project_kws=project_kws,
@@ -300,6 +350,7 @@ def main():
     np.savez(
         out,
         edge_index=edge_index,
+        direction=np.array(args.direction, dtype="<U4"),
         topk=np.int64(args.topk),
         w_kw=np.float32(args.w_keyword),
         w_ind=np.float32(args.w_industry),
