@@ -139,3 +139,62 @@ def test_sampler_missing_src_in_hard_map_falls_back_to_random():
     # Should not crash; negatives are random in [0, 100)
     assert batch.neg_dst.shape == (1, 2)
     assert (batch.neg_dst >= 0).all() and (batch.neg_dst < 100).all()
+
+
+def test_sampler_emits_neg_src_when_c2p_enabled():
+    """With a c2p hard-neg map, the batch also carries project-side negatives
+    drawn from (or filled with) that map."""
+    edges = {"royalty": np.array([[0, 1], [10, 11]], dtype=np.int64)}
+    c2p_map = {
+        10: np.array([200], dtype=np.int64),
+        11: np.array([300], dtype=np.int64),
+    }
+    s = EdgeSampler(
+        edges_per_relation=edges,
+        relation_weights={"royalty": 1.0},
+        n_dst=1000,
+        n_src=1000,
+        num_neg=4,
+        batch_size=2,
+        seed=0,
+        hard_neg_map_c2p=c2p_map,
+        hard_ratio=1.0,
+        c2p_enabled=True,
+    )
+    assert s.c2p_enabled and s.n_hard_c2p == 4
+    batch = next(s.iter_epoch())
+    assert batch.neg_src is not None
+    assert batch.neg_src.shape == (2, 4)
+    # Each row must be drawn from its corresponding company's pool
+    for i in range(batch.pos_dst.shape[0]):
+        c = int(batch.pos_dst[i])
+        expected = set(c2p_map[c].tolist())
+        actual = set(batch.neg_src[i].tolist())
+        assert actual.issubset(expected)
+
+
+def test_sampler_neg_src_none_when_c2p_disabled():
+    edges = {"royalty": np.array([[0], [10]], dtype=np.int64)}
+    s = EdgeSampler(
+        edges_per_relation=edges,
+        relation_weights={"royalty": 1.0},
+        n_dst=100,
+        num_neg=2,
+        batch_size=1,
+        seed=0,
+    )
+    batch = next(s.iter_epoch())
+    assert batch.neg_src is None
+
+
+def test_sampler_c2p_enabled_requires_n_src():
+    import pytest
+    with pytest.raises(ValueError):
+        EdgeSampler(
+            edges_per_relation={"royalty": np.array([[0], [10]], dtype=np.int64)},
+            relation_weights={"royalty": 1.0},
+            n_dst=100,
+            num_neg=2,
+            c2p_enabled=True,
+            # n_src omitted -> should raise
+        )

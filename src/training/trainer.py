@@ -46,6 +46,7 @@ def train_encoder(
     on_checkpoint: Optional[CheckpointFn] = None,
     start_epoch: int = 1,
     history: Optional[list[dict]] = None,
+    c2p_weight: float = 0.0,
 ) -> TrainResult:
     model.to(device)
 
@@ -76,8 +77,15 @@ def train_encoder(
 
             pos_scores = (z_src * z_pos).sum(dim=-1)           # (B,)
             neg_scores = torch.einsum("bd,bkd->bk", z_src, z_neg)  # (B, K)
-
             loss = bpr_loss(pos_scores, neg_scores, weights=weights)
+
+            if batch.neg_src is not None and c2p_weight > 0.0:
+                neg_src = batch.neg_src.to(device)
+                z_neg_src = z_dict[src_node_type][neg_src]     # (B, K, D)
+                neg_scores_c2p = torch.einsum("bd,bkd->bk", z_pos, z_neg_src)
+                loss_c2p = bpr_loss(pos_scores, neg_scores_c2p, weights=weights)
+                loss = loss + c2p_weight * loss_c2p
+
             loss.backward()
             optimizer.step()
 

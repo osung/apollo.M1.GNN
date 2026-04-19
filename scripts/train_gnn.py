@@ -253,17 +253,25 @@ def main() -> None:
     )
     parser.add_argument(
         "--hard-neg-path", default=None,
-        help="npz of pre-mined hard negatives (edge_index shape (2,E), "
-             "row 0=project idx, row 1=company idx)",
+        help="p2c hard negatives npz (row 0=project idx, row 1=company idx)",
+    )
+    parser.add_argument(
+        "--hard-neg-path-c2p", default=None,
+        help="c2p hard negatives npz (row 0=company idx, row 1=project idx). "
+             "Auto-enables symmetric training; still pair with --c2p-weight.",
     )
     parser.add_argument(
         "--hard-ratio", type=float, default=0.5,
-        help="fraction of each row's num_neg that is sampled from the hard pool "
-             "(rest is uniform random); only used when --hard-neg-path is set",
+        help="fraction of num_neg drawn from each side's hard pool (rest random)",
     )
     parser.add_argument(
         "--num-neg", type=int, default=None,
         help="override train.yaml gnn.num_neg_samples",
+    )
+    parser.add_argument(
+        "--c2p-weight", type=float, default=0.0,
+        help="weight of the company→project BPR term added to the loss; "
+             "0 disables c2p training (default). Typical: 1.0 for symmetric.",
     )
     parser.add_argument(
         "--no-normalize", action="store_true",
@@ -331,14 +339,31 @@ def main() -> None:
 
     hard_neg_map: dict[int, np.ndarray] | None = None
     if args.hard_neg_path:
-        print(f"[train_gnn] loading hard negatives {args.hard_neg_path}")
+        print(f"[train_gnn] loading p2c hard negatives {args.hard_neg_path}")
         hard_neg_map = _load_hard_negatives(args.hard_neg_path)
         pool_sizes = np.array([len(v) for v in hard_neg_map.values()])
         print(
-            f"[train_gnn]   {len(hard_neg_map):,} projects have hard-neg pool  "
+            f"[train_gnn]   p2c: {len(hard_neg_map):,} projects  "
             f"(min={pool_sizes.min()}, median={int(np.median(pool_sizes))}, "
-            f"max={pool_sizes.max()})  hard_ratio={args.hard_ratio}"
+            f"max={pool_sizes.max()})"
         )
+
+    hard_neg_map_c2p: dict[int, np.ndarray] | None = None
+    if args.hard_neg_path_c2p:
+        print(f"[train_gnn] loading c2p hard negatives {args.hard_neg_path_c2p}")
+        hard_neg_map_c2p = _load_hard_negatives(args.hard_neg_path_c2p)
+        pool_sizes = np.array([len(v) for v in hard_neg_map_c2p.values()])
+        print(
+            f"[train_gnn]   c2p: {len(hard_neg_map_c2p):,} companies  "
+            f"(min={pool_sizes.min()}, median={int(np.median(pool_sizes))}, "
+            f"max={pool_sizes.max()})"
+        )
+
+    c2p_weight = float(args.c2p_weight)
+    c2p_enabled = c2p_weight > 0.0 or hard_neg_map_c2p is not None
+    if c2p_enabled and c2p_weight == 0.0:
+        c2p_weight = 1.0  # auto-enable with default weight when a c2p pool is provided
+        print(f"[train_gnn]   c2p training auto-enabled (c2p_weight=1.0)")
 
     relation_weights = {
         et: float(graph_cfg["edge_types"][et]["weight"]) for et in REAL_EDGE_TYPES
@@ -348,17 +373,22 @@ def main() -> None:
         edges_per_relation=training_edges,
         relation_weights=relation_weights,
         n_dst=graph[NODE_TYPE_COMPANY].num_nodes,
+        n_src=graph[NODE_TYPE_PROJECT].num_nodes,
         num_neg=num_neg,
         batch_size=bs,
         seed=seed,
         hard_neg_map=hard_neg_map,
-        hard_ratio=args.hard_ratio if hard_neg_map else 0.0,
+        hard_neg_map_c2p=hard_neg_map_c2p,
+        hard_ratio=args.hard_ratio,
+        c2p_enabled=c2p_enabled,
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
 
     print(
         f"[train_gnn] epochs={epochs} batch_size={bs} num_neg={num_neg} "
-        f"(n_hard={sampler.n_hard}, n_random={sampler.n_random}) "
+        f"(p2c n_hard={sampler.n_hard}, n_random={sampler.n_random}; "
+        f"c2p enabled={sampler.c2p_enabled}, weight={c2p_weight}, "
+        f"n_hard={sampler.n_hard_c2p}, n_random={sampler.n_random_c2p}) "
         f"lr={lr} wd={wd} device={args.device}"
     )
 
@@ -444,6 +474,7 @@ def main() -> None:
         on_checkpoint=checkpoint_fn,
         start_epoch=start_epoch,
         history=prev_history,
+        c2p_weight=c2p_weight,
     )
 
     out_p = Path(paths["processed"]["project_emb"])
