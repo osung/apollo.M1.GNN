@@ -269,9 +269,15 @@ def main() -> None:
         help="override train.yaml gnn.num_neg_samples",
     )
     parser.add_argument(
+        "--p2c-weight", type=float, default=1.0,
+        help="weight of the project→company BPR term (default 1.0). Lower "
+             "this below 1.0 if you want c2p to dominate.",
+    )
+    parser.add_argument(
         "--c2p-weight", type=float, default=0.0,
         help="weight of the company→project BPR term added to the loss; "
-             "0 disables c2p training (default). Typical: 1.0 for symmetric.",
+             "0 disables c2p training (default). 1.0 = equal weight to p2c; "
+             "0.5 = p2c weighted 2x higher than c2p.",
     )
     parser.add_argument(
         "--no-normalize", action="store_true",
@@ -386,7 +392,8 @@ def main() -> None:
 
     print(
         f"[train_gnn] epochs={epochs} batch_size={bs} num_neg={num_neg} "
-        f"(p2c n_hard={sampler.n_hard}, n_random={sampler.n_random}; "
+        f"(p2c weight={args.p2c_weight}, n_hard={sampler.n_hard}, "
+        f"n_random={sampler.n_random}; "
         f"c2p enabled={sampler.c2p_enabled}, weight={c2p_weight}, "
         f"n_hard={sampler.n_hard_c2p}, n_random={sampler.n_random_c2p}) "
         f"lr={lr} wd={wd} device={args.device}"
@@ -474,6 +481,7 @@ def main() -> None:
         on_checkpoint=checkpoint_fn,
         start_epoch=start_epoch,
         history=prev_history,
+        p2c_weight=float(args.p2c_weight),
         c2p_weight=c2p_weight,
     )
 
