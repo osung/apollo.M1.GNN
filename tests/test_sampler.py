@@ -62,3 +62,80 @@ def test_sampler_deterministic():
     for ba, bb in zip(a, b):
         assert (ba.pos_src == bb.pos_src).all()
         assert (ba.neg_dst == bb.neg_dst).all()
+
+
+def test_sampler_hard_negatives_drawn_from_pool():
+    """With hard_ratio=1.0 every negative must come from the provided pool."""
+    edges = {"royalty": np.array([[0, 1, 2, 3], [10, 11, 12, 13]], dtype=np.int64)}
+    weights = {"royalty": 1.0}
+    # Small, disjoint pools per source so we can verify provenance.
+    hard_map = {
+        0: np.array([50, 51], dtype=np.int64),
+        1: np.array([60, 61], dtype=np.int64),
+        2: np.array([70, 71], dtype=np.int64),
+        3: np.array([80, 81], dtype=np.int64),
+    }
+    s = EdgeSampler(
+        edges_per_relation=edges,
+        relation_weights=weights,
+        n_dst=100,
+        num_neg=4,
+        batch_size=4,
+        seed=0,
+        hard_neg_map=hard_map,
+        hard_ratio=1.0,
+    )
+    assert s.n_hard == 4 and s.n_random == 0
+    batch = next(s.iter_epoch())
+    for i in range(batch.pos_src.shape[0]):
+        src = int(batch.pos_src[i])
+        expected_pool = set(hard_map[src].tolist())
+        actual = set(batch.neg_dst[i].tolist())
+        assert actual.issubset(expected_pool), (
+            f"src={src} drew negatives outside its pool: {actual - expected_pool}"
+        )
+
+
+def test_sampler_hybrid_hard_plus_random():
+    """hard_ratio=0.5 with num_neg=4 splits 2 hard + 2 random per row."""
+    edges = {"royalty": np.array([[0, 1], [10, 11]], dtype=np.int64)}
+    hard_map = {
+        0: np.array([500], dtype=np.int64),  # single-entry pool; sampled with replacement
+        1: np.array([600], dtype=np.int64),
+    }
+    s = EdgeSampler(
+        edges_per_relation=edges,
+        relation_weights={"royalty": 1.0},
+        n_dst=1000,
+        num_neg=4,
+        batch_size=2,
+        seed=0,
+        hard_neg_map=hard_map,
+        hard_ratio=0.5,
+    )
+    assert s.n_hard == 2 and s.n_random == 2
+    batch = next(s.iter_epoch())
+    for i in range(batch.pos_src.shape[0]):
+        src = int(batch.pos_src[i])
+        # First n_hard columns must be the pool value
+        hard_part = batch.neg_dst[i, :2].tolist()
+        expected = hard_map[src][0]
+        assert all(x == expected for x in hard_part)
+
+
+def test_sampler_missing_src_in_hard_map_falls_back_to_random():
+    edges = {"royalty": np.array([[7], [17]], dtype=np.int64)}
+    s = EdgeSampler(
+        edges_per_relation=edges,
+        relation_weights={"royalty": 1.0},
+        n_dst=100,
+        num_neg=2,
+        batch_size=1,
+        seed=0,
+        hard_neg_map={99: np.array([50])},  # doesn't cover src=7
+        hard_ratio=1.0,
+    )
+    batch = next(s.iter_epoch())
+    # Should not crash; negatives are random in [0, 100)
+    assert batch.neg_dst.shape == (1, 2)
+    assert (batch.neg_dst >= 0).all() and (batch.neg_dst < 100).all()

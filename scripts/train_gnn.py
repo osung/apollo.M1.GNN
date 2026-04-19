@@ -43,6 +43,24 @@ REAL_EDGE_TYPES = (EDGE_ROYALTY, EDGE_COMMERCIAL, EDGE_PERFORMANCE)
 SIM_EDGE_TYPE = "similarity"
 
 
+def _load_hard_negatives(path: str) -> dict[int, np.ndarray]:
+    """Return {project_idx -> np.ndarray of company indices}."""
+    z = np.load(path)
+    ei = z["edge_index"]
+    src = ei[0].astype(np.int64)
+    dst = ei[1].astype(np.int64)
+    order = np.argsort(src, kind="stable")
+    src_s = src[order]
+    dst_s = dst[order]
+    change_points = np.concatenate([[True], src_s[1:] != src_s[:-1]])
+    group_starts = np.where(change_points)[0]
+    group_ends = np.concatenate([group_starts[1:], [src_s.size]])
+    hard_map: dict[int, np.ndarray] = {}
+    for s, e in zip(group_starts, group_ends):
+        hard_map[int(src_s[s])] = dst_s[s:e]
+    return hard_map
+
+
 def _attach_similarity_edges(graph, graph_cfg: dict, override_path: str | None) -> None:
     """Load sim_edges.npz and add (project, similarity, company) + reverse.
 
@@ -233,6 +251,20 @@ def main() -> None:
         help="override sim_edges.npz location (default: graph_cfg.similarity_edges.cache_path "
              "or data/processed/sim_edges.npz)",
     )
+    parser.add_argument(
+        "--hard-neg-path", default=None,
+        help="npz of pre-mined hard negatives (edge_index shape (2,E), "
+             "row 0=project idx, row 1=company idx)",
+    )
+    parser.add_argument(
+        "--hard-ratio", type=float, default=0.5,
+        help="fraction of each row's num_neg that is sampled from the hard pool "
+             "(rest is uniform random); only used when --hard-neg-path is set",
+    )
+    parser.add_argument(
+        "--num-neg", type=int, default=None,
+        help="override train.yaml gnn.num_neg_samples",
+    )
     args = parser.parse_args()
 
     paths = load_yaml(args.paths)
@@ -285,7 +317,18 @@ def main() -> None:
     lr = float(tr_cfg["lr"])
     wd = float(tr_cfg.get("weight_decay", 0.0))
     bs = int(tr_cfg["batch_size"])
-    num_neg = int(tr_cfg.get("num_neg_samples", 5))
+    num_neg = int(args.num_neg or tr_cfg.get("num_neg_samples", 5))
+
+    hard_neg_map: dict[int, np.ndarray] | None = None
+    if args.hard_neg_path:
+        print(f"[train_gnn] loading hard negatives {args.hard_neg_path}")
+        hard_neg_map = _load_hard_negatives(args.hard_neg_path)
+        pool_sizes = np.array([len(v) for v in hard_neg_map.values()])
+        print(
+            f"[train_gnn]   {len(hard_neg_map):,} projects have hard-neg pool  "
+            f"(min={pool_sizes.min()}, median={int(np.median(pool_sizes))}, "
+            f"max={pool_sizes.max()})  hard_ratio={args.hard_ratio}"
+        )
 
     relation_weights = {
         et: float(graph_cfg["edge_types"][et]["weight"]) for et in REAL_EDGE_TYPES
@@ -298,11 +341,14 @@ def main() -> None:
         num_neg=num_neg,
         batch_size=bs,
         seed=seed,
+        hard_neg_map=hard_neg_map,
+        hard_ratio=args.hard_ratio if hard_neg_map else 0.0,
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
 
     print(
         f"[train_gnn] epochs={epochs} batch_size={bs} num_neg={num_neg} "
+        f"(n_hard={sampler.n_hard}, n_random={sampler.n_random}) "
         f"lr={lr} wd={wd} device={args.device}"
     )
 

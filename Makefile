@@ -1,6 +1,6 @@
 PY ?= python
 
-.PHONY: data merge-projects similarity visualize compress-graph decompress-graph train train-coldstart index eval infer test lint baseline-two-tower baseline-cf baseline-lightfm
+.PHONY: data merge-projects similarity hard-negatives visualize compress-graph decompress-graph train train-coldstart index eval eval-embeddings infer test lint baseline-two-tower baseline-cf baseline-lightfm
 
 data:
 	$(PY) scripts/build_graph.py
@@ -10,6 +10,9 @@ merge-projects:
 
 similarity:
 	$(PY) scripts/build_similarity.py
+
+hard-negatives:
+	$(PY) scripts/build_hard_negatives.py
 
 visualize:
 	$(PY) scripts/visualize_graph.py
@@ -31,6 +34,9 @@ index:
 
 eval:
 	$(PY) scripts/evaluate.py
+
+eval-embeddings:
+	$(PY) scripts/evaluate_embeddings.py --sweep-dir data/processed/checkpoints
 
 baseline-two-tower:
 	$(PY) scripts/baseline_two_tower.py
