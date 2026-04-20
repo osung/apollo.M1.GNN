@@ -244,7 +244,14 @@ def main():
     parser.add_argument("--w-industry", type=float, default=0.3)
     parser.add_argument("--w-name", type=float, default=0.2)
     parser.add_argument("--graph-path", default=None)
-    args = parser.parse_args()
+    parser.add_argument(
+        "--exclude-sim-path", action="append", default=[],
+        help="Path to a sim_edges_top*.npz whose pairs should be EXCLUDED from "
+             "hard-negative candidates. Use this for any sim tier that will be "
+             "injected as message-passing edges during training (e.g. top-10), "
+             "so a pair is never simultaneously an MP neighbor and a BPR "
+             "negative. Can be passed multiple times.",
+    )
 
     if args.output is None:
         args.output = str(
@@ -326,6 +333,33 @@ def main():
         f"{len(positive_map):,} {query_side}"
     )
 
+    # 4b. also exclude any sim tier that will be used as message-passing edges.
+    # Those pairs are "treat as connected" at training time, so they must not
+    # simultaneously appear as BPR hard negatives.
+    for exc_path in args.exclude_sim_path:
+        print(f"[hardneg] loading sim edges to EXCLUDE from candidates: {exc_path}")
+        exc_z = np.load(exc_path)
+        exc_ei = exc_z["edge_index"]
+        exc_n_p = int(exc_z["n_project"])
+        exc_n_c = int(exc_z["n_company"])
+        if (exc_n_p, exc_n_c) != (N_p, N_c):
+            raise RuntimeError(
+                f"exclude_sim_path graph dim mismatch: ({exc_n_p},{exc_n_c}) "
+                f"vs graph=({N_p},{N_c})"
+            )
+        n_before = sum(len(v) for v in positive_map.values())
+        if args.direction == "p2c":
+            for p, c in zip(exc_ei[0].tolist(), exc_ei[1].tolist()):
+                positive_map[int(p)].add(int(c))
+        else:
+            for p, c in zip(exc_ei[0].tolist(), exc_ei[1].tolist()):
+                positive_map[int(c)].add(int(p))
+        n_after = sum(len(v) for v in positive_map.values())
+        print(
+            f"[hardneg]   excluded {exc_ei.shape[1]:,} sim pairs  "
+            f"(positive/exclude set: {n_before:,} -> {n_after:,})"
+        )
+
     # 5. mine
     edge_index, stats = mine_hard_negatives(
         sim_ei=sim_ei,
@@ -357,6 +391,7 @@ def main():
         w_name=np.float32(args.w_name),
         n_projects=np.int64(N_p),
         n_companies=np.int64(N_c),
+        excluded_sim_paths=np.array(args.exclude_sim_path or [], dtype=object),
     )
     size_mb = out.stat().st_size / 1e6
     print()
