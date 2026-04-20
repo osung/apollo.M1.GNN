@@ -61,6 +61,57 @@ def _load_hard_negatives(path: str) -> dict[int, np.ndarray]:
     return hard_map
 
 
+def _build_experiment_tag(
+    *,
+    layer_type: str,
+    hidden_dim: int,
+    num_layers: int,
+    num_heads: int,
+    hard_neg_p2c: str | None,
+    hard_neg_c2p: str | None,
+    hard_ratio: float,
+    p2c_weight: float,
+    c2p_weight: float,
+    with_similarity: bool,
+    sim_path: str | None,
+    no_normalize: bool,
+) -> str:
+    """Build a collision-free filename tag that reflects the hyperparameters
+    a user is most likely to vary across parallel runs.
+
+    Short components go first so the common prefix is stable even when the
+    varied fields change. Example:
+
+        hgt_h64_l2_nh4_hr70_p2c10_c2p10_sim10_nonorm
+    """
+    import re
+
+    parts = [
+        layer_type,
+        f"h{hidden_dim}",
+        f"l{num_layers}",
+    ]
+    if layer_type in ("gat", "hgt"):
+        parts.append(f"nh{num_heads}")
+
+    if hard_neg_p2c or hard_neg_c2p:
+        parts.append(f"hr{int(round(hard_ratio * 100)):02d}")
+
+    if abs(p2c_weight - 1.0) > 1e-6:
+        parts.append(f"p2c{int(round(p2c_weight * 100)):02d}")
+    if c2p_weight > 0.0:
+        parts.append(f"c2p{int(round(c2p_weight * 100)):02d}")
+
+    if with_similarity and sim_path:
+        m = re.search(r"top(\d+)", Path(sim_path).name)
+        parts.append(f"sim{m.group(1)}" if m else "sim")
+
+    if no_normalize:
+        parts.append("nonorm")
+
+    return "_".join(parts)
+
+
 def _attach_similarity_edges(graph, graph_cfg: dict, override_path: str | None) -> None:
     """Load sim_edges.npz and add (project, similarity, company) + reverse.
 
@@ -413,11 +464,26 @@ def main() -> None:
             f"[train_gnn] resumed at epoch {ckpt['epoch']}, continuing to {epochs}"
         )
 
+    tag = _build_experiment_tag(
+        layer_type=layer_type,
+        hidden_dim=int(args.hidden_dim or gnn_cfg["hidden_dim"]),
+        num_layers=int(args.num_layers or gnn_cfg["num_layers"]),
+        num_heads=int(args.num_heads or gnn_cfg.get("num_heads", 4)),
+        hard_neg_p2c=args.hard_neg_path,
+        hard_neg_c2p=args.hard_neg_path_c2p,
+        hard_ratio=args.hard_ratio,
+        p2c_weight=float(args.p2c_weight),
+        c2p_weight=c2p_weight,
+        with_similarity=args.with_similarity,
+        sim_path=args.sim_path,
+        no_normalize=args.no_normalize,
+    )
+    print(f"[train_gnn] experiment tag: {tag}")
+
     checkpoint_fn = None
     if args.checkpoint_every and args.checkpoint_every > 0:
         ckpt_dir = Path(args.checkpoint_dir or "data/processed/checkpoints")
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        tag = f"{layer_type}_h{int(args.hidden_dim or gnn_cfg['hidden_dim'])}_l{int(args.num_layers or gnn_cfg['num_layers'])}"
 
         def checkpoint_fn(epoch_idx, z_dict_cpu, mdl, hist):
             suffix = f"{tag}_epoch{epoch_idx:03d}"
@@ -485,8 +551,12 @@ def main() -> None:
         c2p_weight=c2p_weight,
     )
 
-    out_p = Path(paths["processed"]["project_emb"])
-    out_c = Path(paths["processed"]["company_emb"])
+    # Final z saves: keep the paths.yaml defaults but append tag so parallel
+    # runs with different hyperparameters don't clobber each other.
+    out_p_base = Path(paths["processed"]["project_emb"])
+    out_c_base = Path(paths["processed"]["company_emb"])
+    out_p = out_p_base.with_name(f"{out_p_base.stem}_{tag}{out_p_base.suffix}")
+    out_c = out_c_base.with_name(f"{out_c_base.stem}_{tag}{out_c_base.suffix}")
     out_p.parent.mkdir(parents=True, exist_ok=True)
     np.save(out_p, result.z_dict[NODE_TYPE_PROJECT].numpy())
     np.save(out_c, result.z_dict[NODE_TYPE_COMPANY].numpy())
@@ -500,8 +570,14 @@ def main() -> None:
             metrics = _evaluate_z(result.z_dict, held_out, topk=args.topk, direction=d)
             _print_metrics(f"GNN [{layer_type}] final [{d}] K={args.topk}", metrics)
             final_metrics[d] = metrics
-        if args.save_metrics:
-            out = Path(args.save_metrics)
+
+        # Fall back to a tag-based default so parallel runs don't collide.
+        save_metrics_path = args.save_metrics
+        if save_metrics_path is None and (args.checkpoint_every and args.checkpoint_every > 0):
+            ckpt_dir = Path(args.checkpoint_dir or "data/processed/checkpoints")
+            save_metrics_path = str(ckpt_dir / f"metrics_final_{tag}.json")
+        if save_metrics_path:
+            out = Path(save_metrics_path)
             out.parent.mkdir(parents=True, exist_ok=True)
             with open(out, "w") as f:
                 import json
