@@ -457,7 +457,14 @@ def main() -> None:
         print(f"[train_gnn] resuming from {resume_path}")
         ckpt = torch.load(resume_path, weights_only=False, map_location=args.device)
         model.load_state_dict(ckpt["model"])
+        model.to(args.device)
         optimizer.load_state_dict(ckpt["optimizer"])
+        # Optimizer state (momentum buffers) must live on the same device as
+        # the params after .to(). load_state_dict doesn't move them for us.
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(args.device)
         start_epoch = int(ckpt["epoch"]) + 1
         prev_history = list(ckpt.get("history", []))
         print(
