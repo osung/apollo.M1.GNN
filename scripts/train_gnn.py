@@ -75,6 +75,7 @@ def _build_experiment_tag(
     with_similarity: bool,
     sim_path: str | None,
     no_normalize: bool,
+    amp_dtype: str,
 ) -> str:
     """Build a collision-free filename tag that reflects the hyperparameters
     a user is most likely to vary across parallel runs.
@@ -108,6 +109,9 @@ def _build_experiment_tag(
 
     if no_normalize:
         parts.append("nonorm")
+
+    if amp_dtype and amp_dtype != "none":
+        parts.append(amp_dtype)
 
     return "_".join(parts)
 
@@ -340,6 +344,12 @@ def main() -> None:
              "score from the [-1, 1] bound so hard negatives can keep "
              "providing gradient; FAISS inner-product retrieval still works.",
     )
+    parser.add_argument(
+        "--amp-dtype", default="none", choices=["none", "bf16"],
+        help="mixed-precision training dtype. 'bf16' halves activation memory "
+             "and ~2x speed on A100/H100; safe for attention and BPR. Eval/save "
+             "stays in fp32.",
+    )
     args = parser.parse_args()
 
     paths = load_yaml(args.paths)
@@ -488,6 +498,7 @@ def main() -> None:
         with_similarity=args.with_similarity,
         sim_path=args.sim_path,
         no_normalize=args.no_normalize,
+        amp_dtype=args.amp_dtype,
     )
     print(f"[train_gnn] experiment tag: {tag}")
 
@@ -560,6 +571,7 @@ def main() -> None:
         history=prev_history,
         p2c_weight=float(args.p2c_weight),
         c2p_weight=c2p_weight,
+        amp_dtype=args.amp_dtype,
     )
 
     # Final z saves: keep the paths.yaml defaults but append tag so parallel
