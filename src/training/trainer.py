@@ -92,29 +92,39 @@ def train_encoder(
         n_samples = 0
         for step, batch in enumerate(sampler.iter_epoch()):
             optimizer.zero_grad(set_to_none=True)
+
+            # Encoder forward in autocast (bf16 on CUDA if --amp-dtype bf16).
+            # HGT attention softmax and message-passing scatter ops run in
+            # bf16 for speed, but we exit autocast before loss so BPR
+            # log-sigmoid and score accumulation stay in fp32. Autocast
+            # still unwinds backward correctly — gradients land on fp32
+            # parameters regardless.
             with _amp_context(device, amp_dtype):
                 z_dict = model(x_dict, edge_index_dict)
 
-                pos_src = batch.pos_src.to(device)
-                pos_dst = batch.pos_dst.to(device)
-                neg_dst = batch.neg_dst.to(device)
-                weights = batch.weights.to(device)
+            if amp_dtype != "none":
+                z_dict = {k: v.float() for k, v in z_dict.items()}
 
-                z_src = z_dict[src_node_type][pos_src]             # (B, D)
-                z_pos = z_dict[dst_node_type][pos_dst]             # (B, D)
-                z_neg = z_dict[dst_node_type][neg_dst]             # (B, K, D)
+            pos_src = batch.pos_src.to(device)
+            pos_dst = batch.pos_dst.to(device)
+            neg_dst = batch.neg_dst.to(device)
+            weights = batch.weights.to(device)
 
-                pos_scores = (z_src * z_pos).sum(dim=-1)           # (B,)
-                neg_scores = torch.einsum("bd,bkd->bk", z_src, z_neg)  # (B, K)
-                loss_p2c = bpr_loss(pos_scores, neg_scores, weights=weights)
-                loss = p2c_weight * loss_p2c
+            z_src = z_dict[src_node_type][pos_src]             # (B, D)
+            z_pos = z_dict[dst_node_type][pos_dst]             # (B, D)
+            z_neg = z_dict[dst_node_type][neg_dst]             # (B, K, D)
 
-                if batch.neg_src is not None and c2p_weight > 0.0:
-                    neg_src = batch.neg_src.to(device)
-                    z_neg_src = z_dict[src_node_type][neg_src]     # (B, K, D)
-                    neg_scores_c2p = torch.einsum("bd,bkd->bk", z_pos, z_neg_src)
-                    loss_c2p = bpr_loss(pos_scores, neg_scores_c2p, weights=weights)
-                    loss = loss + c2p_weight * loss_c2p
+            pos_scores = (z_src * z_pos).sum(dim=-1)           # (B,)
+            neg_scores = torch.einsum("bd,bkd->bk", z_src, z_neg)  # (B, K)
+            loss_p2c = bpr_loss(pos_scores, neg_scores, weights=weights)
+            loss = p2c_weight * loss_p2c
+
+            if batch.neg_src is not None and c2p_weight > 0.0:
+                neg_src = batch.neg_src.to(device)
+                z_neg_src = z_dict[src_node_type][neg_src]     # (B, K, D)
+                neg_scores_c2p = torch.einsum("bd,bkd->bk", z_pos, z_neg_src)
+                loss_c2p = bpr_loss(pos_scores, neg_scores_c2p, weights=weights)
+                loss = loss + c2p_weight * loss_c2p
 
             loss.backward()
             optimizer.step()
