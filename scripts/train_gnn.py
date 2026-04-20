@@ -320,6 +320,10 @@ def main() -> None:
         help="override train.yaml gnn.num_neg_samples",
     )
     parser.add_argument(
+        "--batch-size", type=int, default=None,
+        help="override train.yaml gnn.batch_size",
+    )
+    parser.add_argument(
         "--p2c-weight", type=float, default=1.0,
         help="weight of the project→company BPR term (default 1.0). Lower "
              "this below 1.0 if you want c2p to dominate.",
@@ -391,7 +395,7 @@ def main() -> None:
     epochs = args.epochs or int(tr_cfg["epochs"])
     lr = float(tr_cfg["lr"])
     wd = float(tr_cfg.get("weight_decay", 0.0))
-    bs = int(tr_cfg["batch_size"])
+    bs = int(args.batch_size or tr_cfg["batch_size"])
     num_neg = int(args.num_neg or tr_cfg.get("num_neg_samples", 5))
 
     hard_neg_map: dict[int, np.ndarray] | None = None
