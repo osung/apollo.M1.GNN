@@ -252,6 +252,7 @@ def main():
              "so a pair is never simultaneously an MP neighbor and a BPR "
              "negative. Can be passed multiple times.",
     )
+    args = parser.parse_args()
 
     if args.output is None:
         args.output = str(
