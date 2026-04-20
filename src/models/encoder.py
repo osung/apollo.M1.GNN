@@ -39,8 +39,13 @@ def _build_layer(
             aggr="sum",
         )
     if layer_type == "gcn":
+        # GraphConv defaults to aggr='add', which blows up on our
+        # high-degree heterogeneous graph (hundreds of neighbors per node,
+        # ~12M similarity edges). Without output L2-normalization the
+        # embeddings explode and BPR loss diverges. Use 'mean' to match
+        # SAGEConv's aggregation style.
         return HeteroConv(
-            {et: GraphConv((-1, -1), hidden_dim) for et in edge_types},
+            {et: GraphConv((-1, -1), hidden_dim, aggr="mean") for et in edge_types},
             aggr="sum",
         )
     if layer_type == "gat":
