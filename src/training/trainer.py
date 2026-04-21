@@ -145,7 +145,6 @@ def train_encoder(
             checkpoint_every
             and on_checkpoint is not None
             and epoch % checkpoint_every == 0
-            and epoch != epochs  # final is saved by the caller
         )
         if should_checkpoint:
             ckpt_z = model.encode_all(x_dict, edge_index_dict)

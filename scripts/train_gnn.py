@@ -586,6 +586,33 @@ def main() -> None:
     print(f"[train_gnn] saved project z -> {out_p}")
     print(f"[train_gnn] saved company z -> {out_c}")
 
+    # Always save the final model state (regardless of checkpoint_every
+    # alignment) when --save-model-ckpt is set, so the very last trained
+    # weights are available for --resume and post-hoc analysis.
+    if args.save_model_ckpt:
+        ckpt_dir = Path(args.checkpoint_dir or "data/processed/checkpoints")
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        suffix = f"{tag}_epoch{epochs:03d}"
+        final_model_path = ckpt_dir / f"model_{suffix}.pt"
+        torch.save(
+            {
+                "epoch": epochs,
+                "model": result.model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "history": result.history,
+                "config": {
+                    "layer_type": layer_type,
+                    "hidden_dim": int(args.hidden_dim or gnn_cfg["hidden_dim"]),
+                    "output_dim": int(args.output_dim or gnn_cfg["output_dim"]),
+                    "num_layers": int(args.num_layers or gnn_cfg["num_layers"]),
+                    "num_heads": int(gnn_cfg.get("num_heads", 4)),
+                    "input_dim": input_dim,
+                },
+            },
+            final_model_path,
+        )
+        print(f"[train_gnn] saved final model -> {final_model_path}")
+
     if not args.no_eval:
         directions = ["p2c", "c2p"] if args.direction == "both" else [args.direction]
         final_metrics: dict[str, dict] = {}
