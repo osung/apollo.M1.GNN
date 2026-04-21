@@ -35,6 +35,7 @@ from src.graph.schema import (
     NODE_TYPE_PROJECT,
 )
 from src.models.encoder import GNNEncoder
+from src.models.lightgcn import LightGCNEncoder
 from src.training.sampler import EdgeSampler
 from src.training.trainer import train_encoder
 from src.utils import load_yaml, set_seed
@@ -380,17 +381,26 @@ def main() -> None:
     gnn_cfg = model_cfg["gnn"]
     input_dim = int(gnn_cfg.get("input_dim") or graph[NODE_TYPE_PROJECT].x.shape[1])
 
-    model = GNNEncoder(
-        input_dim=input_dim,
-        hidden_dim=int(args.hidden_dim or gnn_cfg["hidden_dim"]),
-        output_dim=int(args.output_dim or gnn_cfg["output_dim"]),
-        num_layers=int(args.num_layers or gnn_cfg["num_layers"]),
-        metadata=graph.metadata(),
-        layer_type=layer_type,
-        num_heads=int(args.num_heads or gnn_cfg.get("num_heads", 4)),
-        dropout=float(gnn_cfg.get("dropout", 0.1)),
-        normalize_output=not args.no_normalize,
-    )
+    if layer_type == "lightgcn":
+        model = LightGCNEncoder(
+            input_dim=input_dim,
+            hidden_dim=int(args.hidden_dim or gnn_cfg["hidden_dim"]),
+            num_layers=int(args.num_layers or gnn_cfg["num_layers"]),
+            metadata=graph.metadata(),
+            normalize_output=not args.no_normalize,
+        )
+    else:
+        model = GNNEncoder(
+            input_dim=input_dim,
+            hidden_dim=int(args.hidden_dim or gnn_cfg["hidden_dim"]),
+            output_dim=int(args.output_dim or gnn_cfg["output_dim"]),
+            num_layers=int(args.num_layers or gnn_cfg["num_layers"]),
+            metadata=graph.metadata(),
+            layer_type=layer_type,
+            num_heads=int(args.num_heads or gnn_cfg.get("num_heads", 4)),
+            dropout=float(gnn_cfg.get("dropout", 0.1)),
+            normalize_output=not args.no_normalize,
+        )
     # PyG lazy layers (SAGEConv/GATConv with in_channels=-1) need one forward
     # pass to materialize parameter shapes before anything reads .parameters().
     with torch.no_grad():
