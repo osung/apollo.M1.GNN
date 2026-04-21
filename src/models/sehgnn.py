@@ -155,6 +155,19 @@ class SeHGNNEncoder(nn.Module):
         x_dict: dict[str, torch.Tensor],
         edge_index_dict: dict,
     ) -> dict[str, torch.Tensor]:
+        # Invalidate cache if the input moved to a different device than
+        # where the cache was built. This happens in train_gnn.py, which
+        # runs a dummy CPU forward to materialize lazy PyG layers before
+        # model.to(device). The cache, being a plain attribute rather
+        # than a registered buffer, does not follow .to().
+        any_nt = self.node_types[0]
+        input_device = x_dict[any_nt].device
+        if (
+            self._cached_raw_hops is not None
+            and self._cached_raw_hops[any_nt].device != input_device
+        ):
+            self._cached_raw_hops = None
+
         if self._cached_raw_hops is None:
             self._cached_raw_hops = self._precompute_raw_hops(
                 x_dict, edge_index_dict
