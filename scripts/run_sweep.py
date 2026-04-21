@@ -15,15 +15,18 @@ progress is never lost if the Colab session disconnects.
 Usage (Colab):
     !python scripts/run_sweep.py sage --hidden-dim 128 --epochs 50
 
-Specifics:
-  - hard_count=0 -> no hard-neg file loaded, hard_ratio=0 (pure random).
-  - hard_count=k (k>0) -> num_neg=20, hard_ratio=k/20 (so k hard + (20-k)
-    random). c2p hard-neg file is loaded only when c2p direction is trained.
-  - sim_count=0 -> --with-similarity is not passed (graph has only the
-    three real relations + reverses).
-  - direction='p2c_only' -> c2p_weight=0 (and c2p hard negs not loaded).
-  - direction='c2p_only' -> p2c_weight=0.
-  - direction='both' -> 1.0/1.0 symmetric.
+Checkpointing and resume:
+  - Each inner run saves a checkpoint every --checkpoint-every epochs
+    (default 20) plus a final-epoch checkpoint. Files land in
+    --checkpoint-dir (defaults to the sweep output dir).
+  - --resume: skip any sweep cell whose metrics.json already exists
+    (completed runs are reused as-is).
+  - --resume-checkpoint PATH: parse the filename (e.g.
+    model_sage_h128_l2_hr50_c2p100_sim10_nonorm_epoch040.pt) to figure
+    out which sweep cell was mid-training. The driver skips all cells
+    before it, re-enters train_gnn.py with --resume PATH for that cell
+    to continue from the saved epoch, then runs the remaining cells.
+    Implies --resume semantics for cells already on disk.
 
 OOM handling: subprocess stdout+stderr scanned for 'CUDA out of memory' /
 'torch.OutOfMemoryError'. Those cells are filled with literal string 'OOM'
@@ -33,7 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import re
 import subprocess
 import sys
 import time
@@ -70,6 +73,9 @@ def build_command(
     hard_neg_c2p_path: str,
     sim_path_template: str,
     metrics_path: Path,
+    checkpoint_dir: Path,
+    checkpoint_every: int,
+    resume_from: str | None,
 ) -> list[str]:
     cmd = [
         sys.executable, "scripts/train_gnn.py",
@@ -87,8 +93,11 @@ def build_command(
         "--p2c-weight", f"{p2c_w}",
         "--c2p-weight", f"{c2p_w}",
         "--save-metrics", str(metrics_path),
-        "--checkpoint-every", "0",        # no mid-training checkpoints in sweep
+        "--checkpoint-every", str(checkpoint_every),
+        "--checkpoint-dir", str(checkpoint_dir),
     ]
+    if checkpoint_every > 0:
+        cmd.append("--save-model-ckpt")
 
     # Hard negatives
     if hard_count == 0:
@@ -108,6 +117,9 @@ def build_command(
             "--with-similarity",
             "--sim-path", sim_path_template.format(k=sim_count),
         ])
+
+    if resume_from:
+        cmd.extend(["--resume", resume_from])
     return cmd
 
 
@@ -124,6 +136,67 @@ def parse_metrics_json(path: Path) -> dict:
                 key = f"{d}_{r}_{f_.replace('@', '')}"
                 flat[key] = m.get(f_)
     return flat
+
+
+def parse_checkpoint_name(path: Path) -> dict:
+    """Reverse-engineer a sweep cell from a saved model_*.pt filename.
+
+    Format (from train_gnn.py _build_experiment_tag):
+        model_{layer}_h{hd}_l{L}[_nh{N}][_hr{R}][_p2c{P}][_c2p{C}][_sim{K}][_nonorm][_bf16]_epoch{E}.pt
+
+    Returns dict with keys: model, hidden_dim, num_layers, num_heads,
+    hard_count, sim_count, direction, epoch.
+    """
+    name = path.name
+    m = re.match(
+        r"model_([a-z]+)_h(\d+)_l(\d+)(_nh\d+)?(.*?)_epoch(\d+)\.pt$",
+        name,
+    )
+    if not m:
+        raise ValueError(f"cannot parse checkpoint filename: {name!r}")
+    model = m.group(1)
+    hidden_dim = int(m.group(2))
+    num_layers = int(m.group(3))
+    num_heads_grp = m.group(4)
+    num_heads = int(num_heads_grp[3:]) if num_heads_grp else 4
+    suffix = m.group(5) or ""
+    epoch = int(m.group(6))
+
+    hard_ratio = 0.0
+    p2c_w = 1.0  # tag default: p2c suffix is omitted when p2c==1.0
+    c2p_w = 0.0  # tag default: c2p suffix is omitted when c2p==0
+    sim_count = 0
+
+    if mm := re.search(r"_hr(\d+)", suffix):
+        hard_ratio = int(mm.group(1)) / 100.0
+    if mm := re.search(r"_p2c(\d+)", suffix):
+        p2c_w = int(mm.group(1)) / 100.0
+    if mm := re.search(r"_c2p(\d+)", suffix):
+        c2p_w = int(mm.group(1)) / 100.0
+    if mm := re.search(r"_sim(\d+)", suffix):
+        sim_count = int(mm.group(1))
+
+    hard_count = int(round(hard_ratio * 20))
+
+    if p2c_w > 0 and c2p_w == 0:
+        direction = "p2c_only"
+    elif p2c_w == 0 and c2p_w > 0:
+        direction = "c2p_only"
+    elif p2c_w > 0 and c2p_w > 0:
+        direction = "both"
+    else:
+        raise ValueError(f"Unknown direction from p2c={p2c_w}, c2p={c2p_w}")
+
+    return {
+        "model": model,
+        "hidden_dim": hidden_dim,
+        "num_layers": num_layers,
+        "num_heads": num_heads,
+        "hard_count": hard_count,
+        "sim_count": sim_count,
+        "direction": direction,
+        "epoch": epoch,
+    }
 
 
 def run_once(cmd: list[str], metrics_path: Path) -> tuple[str, float, str]:
@@ -164,6 +237,15 @@ def save_incremental(rows: list[dict], excel_path: Path) -> None:
     df.to_excel(excel_path, index=False, engine="openpyxl")
 
 
+def _fill_metric_columns(row: dict, value) -> None:
+    """Populate all 24 metric cells with a scalar / status string."""
+    for d in ("p2c", "c2p"):
+        for r in RELATIONS:
+            for f_ in METRIC_FIELDS:
+                key = f"{d}_{r}_{f_.replace('@', '')}"
+                row[key] = value
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -179,9 +261,12 @@ def main() -> None:
     )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument(
+        "--checkpoint-every", type=int, default=20,
+        help="save a model checkpoint every N epochs (0 disables)",
+    )
+    parser.add_argument(
         "--graph-path",
         default="/content/drive/MyDrive/apollo.M1.GNN/graph.pt",
-        help="override graph.pt path (Colab default)",
     )
     parser.add_argument(
         "--held-out-path", default="data/processed/held_out.pt",
@@ -197,7 +282,6 @@ def main() -> None:
     parser.add_argument(
         "--sim-path-template",
         default="data/processed/sim_edges_top{k}.npz",
-        help="template with {k} placeholder",
     )
     parser.add_argument(
         "--output-dir",
@@ -205,7 +289,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--resume", action="store_true",
-        help="skip combos whose metrics json already exists",
+        help="skip cells whose metrics json already exists",
+    )
+    parser.add_argument(
+        "--resume-checkpoint", default=None,
+        help=("path to a model_*.pt file. Driver parses the filename to "
+              "locate the matching sweep cell, skips cells before it, "
+              "passes --resume PATH to train_gnn.py for that cell to "
+              "continue training, then runs the remaining cells"),
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -220,21 +311,69 @@ def main() -> None:
         / f"sweep_{args.model}_h{args.hidden_dim}_ep{args.epochs}.xlsx"
     )
 
-    print(f"[sweep] model={args.model}  hd={args.hidden_dim}  "
-          f"ep={args.epochs}  out={excel_path}")
+    # ---- Parse --resume-checkpoint, if given ----
+    resume_cell: tuple[int, int, str] | None = None
+    resume_path: str | None = None
+    resume_from_epoch: int | None = None
+    if args.resume_checkpoint:
+        parsed = parse_checkpoint_name(Path(args.resume_checkpoint))
+        if parsed["model"] != args.model:
+            raise SystemExit(
+                f"checkpoint model {parsed['model']!r} != --model "
+                f"{args.model!r}"
+            )
+        if parsed["hidden_dim"] != args.hidden_dim:
+            print(
+                f"WARNING: checkpoint hd={parsed['hidden_dim']} "
+                f"!= --hidden-dim {args.hidden_dim}"
+            )
+        if parsed["hard_count"] not in HARD_COUNTS:
+            raise SystemExit(
+                f"checkpoint hard_count={parsed['hard_count']} not in sweep "
+                f"grid {HARD_COUNTS}"
+            )
+        if parsed["sim_count"] not in SIM_COUNTS:
+            raise SystemExit(
+                f"checkpoint sim_count={parsed['sim_count']} not in sweep "
+                f"grid {SIM_COUNTS}"
+            )
+        resume_cell = (
+            parsed["hard_count"],
+            parsed["sim_count"],
+            parsed["direction"],
+        )
+        resume_path = args.resume_checkpoint
+        resume_from_epoch = parsed["epoch"]
+        print(
+            f"[sweep] resume-checkpoint parsed: {resume_cell} "
+            f"at ep{resume_from_epoch}  (file={Path(resume_path).name})"
+        )
+
+    # --resume-checkpoint implies skipping completed cells via --resume
+    use_skip_completed = args.resume or bool(args.resume_checkpoint)
+
+    print(
+        f"[sweep] model={args.model}  hd={args.hidden_dim}  "
+        f"ep={args.epochs}  ckpt_every={args.checkpoint_every}  "
+        f"out={excel_path}"
+    )
     total = len(HARD_COUNTS) * len(SIM_COUNTS) * len(DIRECTIONS)
-    print(f"[sweep] {total} runs queued "
-          f"({len(HARD_COUNTS)} hard x {len(SIM_COUNTS)} sim x "
-          f"{len(DIRECTIONS)} direction)")
+    print(
+        f"[sweep] {total} cells queued  "
+        f"({len(HARD_COUNTS)} hard x {len(SIM_COUNTS)} sim x "
+        f"{len(DIRECTIONS)} direction)"
+    )
 
     rows: list[dict] = []
     idx = 0
+    reached_resume_cell = resume_cell is None
     t_sweep = time.time()
 
     for hard_count in HARD_COUNTS:
         for sim_count in SIM_COUNTS:
             for dir_name, p2c_w, c2p_w in DIRECTIONS:
                 idx += 1
+                current = (hard_count, sim_count, dir_name)
                 tag = (
                     f"{args.model}_h{args.hidden_dim}"
                     f"_hn{hard_count}_sim{sim_count}_{dir_name}"
@@ -242,7 +381,57 @@ def main() -> None:
                 )
                 metrics_path = output_dir / f"metrics_{tag}.json"
 
+                # Determine whether to pass --resume PATH to this cell
+                this_resume: str | None = None
+                if resume_cell is not None and current == resume_cell:
+                    this_resume = resume_path
+                    reached_resume_cell = True
+
+                base_row = {
+                    "model": args.model,
+                    "hidden_dim": args.hidden_dim,
+                    "num_layers": args.num_layers,
+                    "num_heads": args.num_heads,
+                    "epochs": args.epochs,
+                    "hard_count": hard_count,
+                    "sim_count": sim_count,
+                    "direction": dir_name,
+                    "p2c_weight": p2c_w,
+                    "c2p_weight": c2p_w,
+                }
+
                 print(f"\n=== [{idx}/{total}] {tag} ===")
+
+                # Case A: metrics exist and resume mode -> reuse
+                if use_skip_completed and metrics_path.exists():
+                    try:
+                        row = {**base_row,
+                               "status": "REUSED",
+                               "elapsed_s": 0.0,
+                               **parse_metrics_json(metrics_path)}
+                        rows.append(row)
+                        save_incremental(rows, excel_path)
+                        print(f"  reuse (metrics exist): {metrics_path.name}")
+                        continue
+                    except Exception as e:  # noqa: BLE001
+                        print(f"  metrics re-parse failed ({e}); re-running")
+
+                # Case B: before the resume-checkpoint cell, no metrics
+                # -> skip silently but log
+                if resume_cell is not None and not reached_resume_cell:
+                    row = {**base_row,
+                           "status": "SKIPPED_PRE_RESUME",
+                           "elapsed_s": 0.0}
+                    _fill_metric_columns(row, "SKIPPED")
+                    rows.append(row)
+                    save_incremental(rows, excel_path)
+                    print(
+                        "  skip (pre resume-checkpoint cell; "
+                        "no metrics on disk either)"
+                    )
+                    continue
+
+                # Case C: run this cell (fresh or resumed)
                 cmd = build_command(
                     model=args.model,
                     hidden_dim=args.hidden_dim,
@@ -259,58 +448,47 @@ def main() -> None:
                     hard_neg_c2p_path=args.hard_neg_c2p_path,
                     sim_path_template=args.sim_path_template,
                     metrics_path=metrics_path,
+                    checkpoint_dir=output_dir,
+                    checkpoint_every=args.checkpoint_every,
+                    resume_from=this_resume,
                 )
 
                 if args.dry_run:
                     print("  CMD:", " ".join(cmd))
+                    if this_resume:
+                        print(f"  RESUME FROM: {this_resume}")
                     continue
 
-                if args.resume and metrics_path.exists():
-                    print(f"  skip (resume): {metrics_path.name}")
-                    status, elapsed, tail = "OK", 0.0, ""
-                else:
-                    status, elapsed, tail = run_once(cmd, metrics_path)
-                    print(f"  status={status}  elapsed={elapsed:.1f}s")
-                    if status != "OK":
-                        print(f"  log tail: ...{tail[-300:]}")
+                if this_resume:
+                    print(f"  resuming from: {this_resume}")
 
-                row: dict = {
-                    "model": args.model,
-                    "hidden_dim": args.hidden_dim,
-                    "num_layers": args.num_layers,
-                    "num_heads": args.num_heads,
-                    "epochs": args.epochs,
-                    "hard_count": hard_count,
-                    "sim_count": sim_count,
-                    "direction": dir_name,
-                    "p2c_weight": p2c_w,
-                    "c2p_weight": c2p_w,
-                    "status": status,
-                    "elapsed_s": round(elapsed, 1) if elapsed else 0.0,
-                }
+                status, elapsed, tail = run_once(cmd, metrics_path)
+                print(f"  status={status}  elapsed={elapsed:.1f}s")
+                if status != "OK":
+                    print(f"  log tail: ...{tail[-300:]}")
+
+                row = {**base_row,
+                       "status": status,
+                       "elapsed_s": round(elapsed, 1)}
 
                 if status == "OK" and metrics_path.exists():
                     try:
                         row.update(parse_metrics_json(metrics_path))
                     except Exception as e:  # noqa: BLE001
                         row["status"] = f"PARSE_ERROR: {e}"
-                        for d in ("p2c", "c2p"):
-                            for r in RELATIONS:
-                                for f_ in METRIC_FIELDS:
-                                    key = f"{d}_{r}_{f_.replace('@', '')}"
-                                    row[key] = "PARSE_ERROR"
+                        _fill_metric_columns(row, "PARSE_ERROR")
                 else:
-                    # Fill metric cells with the status marker so the Excel
-                    # sheet clearly shows OOM / TIMEOUT / ERROR runs.
-                    for d in ("p2c", "c2p"):
-                        for r in RELATIONS:
-                            for f_ in METRIC_FIELDS:
-                                key = f"{d}_{r}_{f_.replace('@', '')}"
-                                row[key] = status
+                    _fill_metric_columns(row, status)
 
                 rows.append(row)
                 save_incremental(rows, excel_path)
                 print(f"  wrote {idx}/{total} rows -> {excel_path}")
+
+    if resume_cell is not None and not reached_resume_cell:
+        print(
+            f"\nWARNING: --resume-checkpoint cell {resume_cell} never "
+            f"matched any entry in the sweep grid; nothing was resumed."
+        )
 
     total_elapsed = time.time() - t_sweep
     print(
