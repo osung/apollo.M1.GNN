@@ -36,6 +36,7 @@ from src.graph.schema import (
 )
 from src.models.encoder import GNNEncoder
 from src.models.lightgcn import LightGCNEncoder
+from src.models.sehgnn import SeHGNNEncoder
 from src.training.sampler import EdgeSampler
 from src.training.trainer import train_encoder
 from src.utils import load_yaml, set_seed
@@ -387,6 +388,17 @@ def main() -> None:
             hidden_dim=int(args.hidden_dim or gnn_cfg["hidden_dim"]),
             num_layers=int(args.num_layers or gnn_cfg["num_layers"]),
             metadata=graph.metadata(),
+            normalize_output=not args.no_normalize,
+        )
+    elif layer_type == "sehgnn":
+        # num_layers acts as num_hops for SeHGNN (K-hop preprocessing)
+        model = SeHGNNEncoder(
+            input_dim=input_dim,
+            hidden_dim=int(args.hidden_dim or gnn_cfg["hidden_dim"]),
+            num_hops=int(args.num_layers or gnn_cfg["num_layers"]),
+            metadata=graph.metadata(),
+            num_heads=int(args.num_heads or gnn_cfg.get("num_heads", 4)),
+            dropout=float(gnn_cfg.get("dropout", 0.1)),
             normalize_output=not args.no_normalize,
         )
     else:
