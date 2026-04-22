@@ -65,6 +65,7 @@ class SeHGNNEncoder(nn.Module):
         num_heads: int = 4,
         dropout: float = 0.1,
         normalize_output: bool = True,
+        fusion_chunk_size: int = 32768,
     ):
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -77,6 +78,12 @@ class SeHGNNEncoder(nn.Module):
         self.node_types = tuple(node_types)
         self.edge_types = tuple(metadata[1])
         self.hidden_dim = hidden_dim
+        # PyTorch's efficient attention kernel fails when batch > 65535
+        # with dropout>0 (scaled_dot_product_attention limitation). Our
+        # node counts (~430K projects, ~817K companies) exceed that, so
+        # we run the Transformer fusion in chunks. Per-node fusion is
+        # independent, so chunking is exact (not an approximation).
+        self.fusion_chunk_size = int(fusion_chunk_size)
 
         # Shared projection: raw features -> hidden_dim (applied per hop)
         self.input_proj = nn.ModuleDict(
@@ -180,8 +187,18 @@ class SeHGNNEncoder(nn.Module):
             proj = self.input_proj[nt](raw)
             # Add hop position embedding, broadcast across nodes
             proj = proj + self.hop_embedding.unsqueeze(0)
-            # Transformer attends across the K+1 hop axis per node
-            fused = self.fusion(proj)  # (N, K+1, hidden_dim)
+            # Transformer attends across the K+1 hop axis per node. Per-node
+            # attention is independent, so we chunk along the batch axis
+            # to stay under PyTorch's efficient-attention 65535 limit.
+            n = proj.shape[0]
+            if n <= self.fusion_chunk_size:
+                fused = self.fusion(proj)
+            else:
+                chunks = []
+                for start in range(0, n, self.fusion_chunk_size):
+                    end = min(start + self.fusion_chunk_size, n)
+                    chunks.append(self.fusion(proj[start:end]))
+                fused = torch.cat(chunks, dim=0)
             # Mean pool across hops
             pooled = fused.mean(dim=1)
             result[nt] = self.output_proj[nt](pooled)
