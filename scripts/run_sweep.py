@@ -250,7 +250,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "model",
-        choices=["sage", "gcn", "gat", "hgt", "lightgcn", "sehgnn"],
+        choices=["sage", "gcn", "gat", "hgt", "lightgcn", "sehgnn", "gfm"],
         help="GNN architecture to sweep",
     )
     parser.add_argument("--hidden-dim", type=int, default=128)

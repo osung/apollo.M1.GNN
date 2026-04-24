@@ -35,6 +35,7 @@ from src.graph.schema import (
     NODE_TYPE_PROJECT,
 )
 from src.models.encoder import GNNEncoder
+from src.models.gfm import GFMEncoder
 from src.models.lightgcn import LightGCNEncoder
 from src.models.sehgnn import SeHGNNEncoder
 from src.training.sampler import EdgeSampler
@@ -398,6 +399,16 @@ def main() -> None:
             num_hops=int(args.num_layers or gnn_cfg["num_layers"]),
             metadata=graph.metadata(),
             num_heads=int(args.num_heads or gnn_cfg.get("num_heads", 4)),
+            dropout=float(gnn_cfg.get("dropout", 0.1)),
+            normalize_output=not args.no_normalize,
+        )
+    elif layer_type == "gfm":
+        model = GFMEncoder(
+            input_dim=input_dim,
+            hidden_dim=int(args.hidden_dim or gnn_cfg["hidden_dim"]),
+            output_dim=int(args.output_dim or gnn_cfg["output_dim"]),
+            num_layers=int(args.num_layers or gnn_cfg["num_layers"]),
+            metadata=graph.metadata(),
             dropout=float(gnn_cfg.get("dropout", 0.1)),
             normalize_output=not args.no_normalize,
         )
