@@ -23,3 +23,6 @@ data/processed/
 .vscode/
 .idea/
 .DS_Store
+
+# generated result exports
+results/
