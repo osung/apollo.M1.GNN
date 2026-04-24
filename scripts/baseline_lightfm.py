@@ -55,6 +55,12 @@ def main() -> None:
     )
     parser.add_argument("--loss", default="warp", choices=["warp", "bpr", "logistic"])
     parser.add_argument("--direction", default="p2c", choices=["p2c", "c2p"])
+    parser.add_argument(
+        "--train-perspective", default="project", choices=["project", "company"],
+        help="which side is treated as 'user' during WARP training. "
+             "'project' (default) = LightFM's native p2c optimization. "
+             "'company' swaps roles so WARP directly optimizes c2p retrieval.",
+    )
     args = parser.parse_args()
 
     paths = load_yaml(args.paths)
@@ -74,6 +80,19 @@ def main() -> None:
         et: float(graph_cfg["edge_types"][et]["weight"]) for et in REAL_EDGE_TYPES
     }
 
+    # When training from the company perspective, swap the user/item roles so
+    # LightFM's WARP loss (which optimizes rank of positive items given a user)
+    # directly targets company->project retrieval.
+    if args.train_perspective == "company":
+        print("[lightfm] swapping user/item: company=user, project=item")
+        user_x, item_x = company_x, project_x
+        train_edges = {
+            et: edges[[1, 0]].copy() if edges.shape[1] > 0 else edges
+            for et, edges in train_edges.items()
+        }
+    else:
+        user_x, item_x = project_x, company_x
+
     cfg = LightFMConfig(
         no_components=args.no_components,
         epochs=args.epochs,
@@ -83,13 +102,46 @@ def main() -> None:
     model = LightFMBaseline(cfg)
     print(
         f"[lightfm] fitting: no_components={cfg.no_components} "
-        f"epochs={cfg.epochs} identity_mode={cfg.identity_mode} loss={cfg.loss}"
+        f"epochs={cfg.epochs} identity_mode={cfg.identity_mode} "
+        f"loss={cfg.loss} train_perspective={args.train_perspective}"
     )
-    model.fit(project_x, company_x, train_edges, relation_weights)
+    model.fit(user_x, item_x, train_edges, relation_weights)
 
     held_edges = _collect_edges(held_out, REAL_EDGE_TYPES)
-    gt_direction = "project_to_company" if args.direction == "p2c" else "company_to_project"
-    recommend = model.recommend_companies if args.direction == "p2c" else model.recommend_projects
+
+    # eval direction is always specified in the original (project,company)
+    # convention. When we trained from the company perspective, we need to
+    # flip which recommender reaches which side, and which side of the
+    # held-out edges is the query.
+    #
+    #   direction = p2c: query = project, candidates = companies
+    #   direction = c2p: query = company, candidates = projects
+    #
+    #   train_perspective = project (default):
+    #     user-side = project, item-side = company
+    #     p2c -> recommend_companies(project_ids)  (user -> items)
+    #     c2p -> recommend_projects(company_ids)   (reversed)
+    #
+    #   train_perspective = company:
+    #     user-side = company, item-side = project
+    #     p2c -> recommend_projects(project_ids)   (reversed, using i_emb)
+    #     c2p -> recommend_companies(company_ids)  (user -> items, native)
+    gt_direction = (
+        "project_to_company" if args.direction == "p2c"
+        else "company_to_project"
+    )
+    if args.train_perspective == "project":
+        recommend = (
+            model.recommend_companies if args.direction == "p2c"
+            else model.recommend_projects
+        )
+    else:  # train_perspective == "company": user-side is company
+        # After swap, recommend_companies is "user->items" (c2p native),
+        # recommend_projects is "items->users" (p2c reversed).
+        recommend = (
+            model.recommend_companies if args.direction == "c2p"
+            else model.recommend_projects
+        )
 
     per_relation_metrics: dict[str, dict[str, float]] = {}
     for et in REAL_EDGE_TYPES:
