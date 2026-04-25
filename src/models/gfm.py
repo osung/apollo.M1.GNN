@@ -108,6 +108,11 @@ class GFMLayer(nn.Module):
             d = x_src.shape[1]
 
             row, col, w = _symmetric_norm_weight(edge_index, num_src, num_dst)
+            # Cast sym-norm weight to x_src.dtype so that under bf16 autocast
+            # the message m_e and the accumulator sum_msg agree on dtype.
+            # Without this, w stays fp32 → m_e gets promoted to fp32 → scatter_add
+            # into bf16 sum_msg fails with "self.dtype != src.dtype".
+            w = w.to(x_src.dtype)
             m_e = x_src[row] * w.unsqueeze(-1)  # (E, d): weighted messages
 
             idx = col.unsqueeze(-1).expand(-1, d)
