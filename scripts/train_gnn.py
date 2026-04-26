@@ -79,6 +79,7 @@ def _build_experiment_tag(
     sim_path: str | None,
     no_normalize: bool,
     amp_dtype: str,
+    mp_edge_weights: bool = True,
 ) -> str:
     """Build a collision-free filename tag that reflects the hyperparameters
     a user is most likely to vary across parallel runs.
@@ -115,6 +116,10 @@ def _build_experiment_tag(
 
     if amp_dtype and amp_dtype != "none":
         parts.append(amp_dtype)
+
+    # Mark only when MP edge weights are disabled (default: enabled, no marker)
+    if not mp_edge_weights:
+        parts.append("nompw")
 
     return "_".join(parts)
 
@@ -353,6 +358,15 @@ def main() -> None:
              "and ~2x speed on A100/H100; safe for attention and BPR. Eval/save "
              "stays in fp32.",
     )
+    parser.add_argument(
+        "--mp-edge-weights",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="apply per-relation edge weight (royalty=1.0, commercial=0.75, "
+             "performance=0.5, similarity=0.25 by default) in GFM/LightGCN/"
+             "SeHGNN message passing. Default: enabled. Use --no-mp-edge-weights "
+             "for ablation or to reproduce pre-2026-04-26 runs.",
+    )
     args = parser.parse_args()
 
     paths = load_yaml(args.paths)
@@ -532,8 +546,14 @@ def main() -> None:
         sim_path=args.sim_path,
         no_normalize=args.no_normalize,
         amp_dtype=args.amp_dtype,
+        mp_edge_weights=args.mp_edge_weights,
     )
     print(f"[train_gnn] experiment tag: {tag}")
+    if not args.mp_edge_weights:
+        print(
+            "[train_gnn] MP edge weights DISABLED (--no-mp-edge-weights); "
+            "all relations contribute uniform message strength"
+        )
 
     checkpoint_fn = None
     if args.checkpoint_every and args.checkpoint_every > 0:
@@ -605,6 +625,7 @@ def main() -> None:
         p2c_weight=float(args.p2c_weight),
         c2p_weight=c2p_weight,
         amp_dtype=args.amp_dtype,
+        use_mp_edge_weights=args.mp_edge_weights,
     )
 
     # Final z saves: keep the paths.yaml defaults but append tag so parallel

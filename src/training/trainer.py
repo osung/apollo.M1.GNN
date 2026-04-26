@@ -66,6 +66,7 @@ def train_encoder(
     p2c_weight: float = 1.0,
     c2p_weight: float = 0.0,
     amp_dtype: str = "none",
+    use_mp_edge_weights: bool = True,
 ) -> TrainResult:
     if amp_dtype not in _AMP_DTYPES:
         raise ValueError(
@@ -88,13 +89,17 @@ def train_encoder(
     # sym-norm message weights so high-priority relations propagate more
     # signal. Models that don't support this (SAGE/GCN/GAT/HGT via
     # HeteroConv) silently ignore the dict.
-    edge_weight_dict: dict | None = {}
-    for et in graph.edge_types:
-        ew = getattr(graph[et], "edge_weight", None)
-        if ew is not None:
-            edge_weight_dict[et] = ew.to(device)
-    if not edge_weight_dict:
-        edge_weight_dict = None
+    # When use_mp_edge_weights=False (CLI --no-mp-edge-weights), pass None
+    # so all relations contribute uniform message strength (legacy behavior).
+    edge_weight_dict: dict | None = None
+    if use_mp_edge_weights:
+        edge_weight_dict = {}
+        for et in graph.edge_types:
+            ew = getattr(graph[et], "edge_weight", None)
+            if ew is not None:
+                edge_weight_dict[et] = ew.to(device)
+        if not edge_weight_dict:
+            edge_weight_dict = None
 
     history = list(history) if history else []
     for epoch in range(start_epoch, epochs + 1):
