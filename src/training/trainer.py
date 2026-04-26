@@ -66,7 +66,7 @@ def train_encoder(
     p2c_weight: float = 1.0,
     c2p_weight: float = 0.0,
     amp_dtype: str = "none",
-    use_mp_edge_weights: bool = True,
+    use_mp_edge_weights: bool = False,
 ) -> TrainResult:
     if amp_dtype not in _AMP_DTYPES:
         raise ValueError(

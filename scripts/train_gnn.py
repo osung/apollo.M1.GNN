@@ -79,7 +79,7 @@ def _build_experiment_tag(
     sim_path: str | None,
     no_normalize: bool,
     amp_dtype: str,
-    mp_edge_weights: bool = True,
+    mp_edge_weights: bool = False,
 ) -> str:
     """Build a collision-free filename tag that reflects the hyperparameters
     a user is most likely to vary across parallel runs.
@@ -117,9 +117,9 @@ def _build_experiment_tag(
     if amp_dtype and amp_dtype != "none":
         parts.append(amp_dtype)
 
-    # Mark only when MP edge weights are disabled (default: enabled, no marker)
-    if not mp_edge_weights:
-        parts.append("nompw")
+    # Mark only when MP edge weights are enabled (default: disabled, no marker)
+    if mp_edge_weights:
+        parts.append("mpw")
 
     return "_".join(parts)
 
@@ -361,11 +361,12 @@ def main() -> None:
     parser.add_argument(
         "--mp-edge-weights",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="apply per-relation edge weight (royalty=1.0, commercial=0.75, "
              "performance=0.5, similarity=0.25 by default) in GFM/LightGCN/"
-             "SeHGNN message passing. Default: enabled. Use --no-mp-edge-weights "
-             "for ablation or to reproduce pre-2026-04-26 runs.",
+             "SeHGNN/GCN message passing. Default: DISABLED — pass "
+             "--mp-edge-weights to enable. When enabled, the experiment tag "
+             "gets a '_mpw' suffix to keep checkpoints distinct from legacy runs.",
     )
     args = parser.parse_args()
 
@@ -549,10 +550,11 @@ def main() -> None:
         mp_edge_weights=args.mp_edge_weights,
     )
     print(f"[train_gnn] experiment tag: {tag}")
-    if not args.mp_edge_weights:
+    if args.mp_edge_weights:
         print(
-            "[train_gnn] MP edge weights DISABLED (--no-mp-edge-weights); "
-            "all relations contribute uniform message strength"
+            "[train_gnn] MP edge weights ENABLED (--mp-edge-weights); "
+            "royalty=1.0, commercial=0.75, performance=0.5, similarity=0.25 "
+            "applied to message-passing weights"
         )
 
     checkpoint_fn = None
