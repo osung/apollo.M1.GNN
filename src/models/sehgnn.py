@@ -118,12 +118,17 @@ class SeHGNNEncoder(nn.Module):
         self,
         x_dict: dict[str, torch.Tensor],
         edge_index_dict: dict,
+        edge_weight_dict: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute (K+1)-hop raw propagated features per node type.
 
         Returns dict[node_type] -> (N_nt, K+1, input_dim).
         Each hop uses the sum of sym-normalized messages across all
         edge types that land on that node type. Non-parametric.
+
+        If edge_weight_dict is provided, multiplies the per-edge sym-norm
+        weight by the relation's scalar weight (e.g., royalty=1.0,
+        sim=0.25) so high-priority relations contribute more signal.
         """
         current = {nt: x_dict[nt] for nt in self.node_types}
         hops = {nt: [current[nt]] for nt in self.node_types}
@@ -144,6 +149,10 @@ class SeHGNNEncoder(nn.Module):
                 num_src = x_src.shape[0]
                 num_dst = current[dst_type].shape[0]
                 row, col, w = _symmetric_norm(edge_index, num_src, num_dst)
+                if edge_weight_dict is not None:
+                    ew = edge_weight_dict.get(et)
+                    if ew is not None:
+                        w = w * ew.to(w.dtype)
                 msg = x_src[row] * w.unsqueeze(-1)
                 idx = col.unsqueeze(-1).expand(-1, x_src.shape[1])
                 new_h[dst_type].scatter_add_(0, idx, msg)
@@ -161,6 +170,7 @@ class SeHGNNEncoder(nn.Module):
         self,
         x_dict: dict[str, torch.Tensor],
         edge_index_dict: dict,
+        edge_weight_dict: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         # Invalidate cache if the input moved to a different device than
         # where the cache was built. This happens in train_gnn.py, which
@@ -177,7 +187,7 @@ class SeHGNNEncoder(nn.Module):
 
         if self._cached_raw_hops is None:
             self._cached_raw_hops = self._precompute_raw_hops(
-                x_dict, edge_index_dict
+                x_dict, edge_index_dict, edge_weight_dict
             )
 
         result: dict[str, torch.Tensor] = {}
@@ -212,6 +222,7 @@ class SeHGNNEncoder(nn.Module):
         self,
         x_dict: dict[str, torch.Tensor],
         edge_index_dict: dict,
+        edge_weight_dict: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         self.eval()
-        return self.forward(x_dict, edge_index_dict)
+        return self.forward(x_dict, edge_index_dict, edge_weight_dict)

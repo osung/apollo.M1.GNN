@@ -84,6 +84,7 @@ class LightGCNEncoder(nn.Module):
         self,
         h_dict: dict[str, torch.Tensor],
         edge_index_dict: dict,
+        edge_weight_dict: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         new_h: dict[str, torch.Tensor] = {
             nt: torch.zeros_like(h_dict[nt]) for nt in self.node_types
@@ -100,6 +101,12 @@ class LightGCNEncoder(nn.Module):
             num_src = x_src.shape[0]
             num_dst = h_dict[dst_type].shape[0]
             row, col, w = _symmetric_norm(edge_index, num_src, num_dst)
+            # Apply relation-specific edge weight (royalty=1.0, ..., sim=0.25)
+            # so higher-priority relations propagate stronger signal.
+            if edge_weight_dict is not None:
+                ew = edge_weight_dict.get(et)
+                if ew is not None:
+                    w = w * ew.to(w.dtype)
 
             # message = w * x_src[row]  shape (E, D)
             msg = x_src[row] * w.unsqueeze(-1)
@@ -112,6 +119,7 @@ class LightGCNEncoder(nn.Module):
         self,
         x_dict: dict[str, torch.Tensor],
         edge_index_dict: dict,
+        edge_weight_dict: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         # h_0: project features into embedding space
         h_dict = {nt: self.input_proj[nt](x_dict[nt]) for nt in self.node_types}
@@ -120,7 +128,7 @@ class LightGCNEncoder(nn.Module):
         all_h = [{nt: h_dict[nt] for nt in self.node_types}]
 
         for _ in range(self.num_layers):
-            h_dict = self._propagate_one_layer(h_dict, edge_index_dict)
+            h_dict = self._propagate_one_layer(h_dict, edge_index_dict, edge_weight_dict)
             all_h.append({nt: h_dict[nt] for nt in self.node_types})
 
         # Layer combination: mean across L+1 layers (paper default)
@@ -140,6 +148,7 @@ class LightGCNEncoder(nn.Module):
         self,
         x_dict: dict[str, torch.Tensor],
         edge_index_dict: dict,
+        edge_weight_dict: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         self.eval()
-        return self.forward(x_dict, edge_index_dict)
+        return self.forward(x_dict, edge_index_dict, edge_weight_dict)

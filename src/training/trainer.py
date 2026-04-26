@@ -82,6 +82,19 @@ def train_encoder(
     edge_index_dict = {
         et: graph[et].edge_index.to(device) for et in graph.edge_types
     }
+    # Per-relation edge weights from graph[et].edge_weight (royalty=1.0,
+    # commercial=0.75, performance=0.5, similarity=0.25 by default).
+    # Custom encoders (GFM/LightGCN/SeHGNN) multiply these into their
+    # sym-norm message weights so high-priority relations propagate more
+    # signal. Models that don't support this (SAGE/GCN/GAT/HGT via
+    # HeteroConv) silently ignore the dict.
+    edge_weight_dict: dict | None = {}
+    for et in graph.edge_types:
+        ew = getattr(graph[et], "edge_weight", None)
+        if ew is not None:
+            edge_weight_dict[et] = ew.to(device)
+    if not edge_weight_dict:
+        edge_weight_dict = None
 
     history = list(history) if history else []
     for epoch in range(start_epoch, epochs + 1):
@@ -100,7 +113,7 @@ def train_encoder(
             # still unwinds backward correctly — gradients land on fp32
             # parameters regardless.
             with _amp_context(device, amp_dtype):
-                z_dict = model(x_dict, edge_index_dict)
+                z_dict = model(x_dict, edge_index_dict, edge_weight_dict)
 
             if amp_dtype != "none":
                 z_dict = {k: v.float() for k, v in z_dict.items()}
@@ -147,12 +160,12 @@ def train_encoder(
             and epoch % checkpoint_every == 0
         )
         if should_checkpoint:
-            ckpt_z = model.encode_all(x_dict, edge_index_dict)
+            ckpt_z = model.encode_all(x_dict, edge_index_dict, edge_weight_dict)
             ckpt_z_cpu = {k: v.detach().cpu() for k, v in ckpt_z.items()}
             on_checkpoint(epoch, ckpt_z_cpu, model, history)
             model.train()
 
-    z_dict = model.encode_all(x_dict, edge_index_dict)
+    z_dict = model.encode_all(x_dict, edge_index_dict, edge_weight_dict)
     return TrainResult(
         model=model,
         z_dict={k: v.detach().cpu() for k, v in z_dict.items()},

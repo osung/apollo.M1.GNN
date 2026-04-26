@@ -106,7 +106,14 @@ class GNNEncoder(nn.Module):
         self,
         x_dict: dict[str, torch.Tensor],
         edge_index_dict: dict,
+        edge_weight_dict: dict | None = None,
     ) -> dict[str, torch.Tensor]:
+        # NOTE: edge_weight_dict is accepted for API consistency with the
+        # custom GFM/LightGCN/SeHGNN encoders, but currently unused here.
+        # SAGEConv/GATConv/HGTConv don't accept an edge_weight kwarg via
+        # HeteroConv; only GraphConv (gcn) does. Adding GCN-only weighted MP
+        # would require a separate per-relation forward path. Left as TODO.
+        del edge_weight_dict
         h_dict = {nt: self.input_proj[nt](x_dict[nt]) for nt in self.node_types}
         for layer in self.layers:
             h_dict = layer(h_dict, edge_index_dict)
@@ -123,7 +130,8 @@ class GNNEncoder(nn.Module):
         self,
         x_dict: dict[str, torch.Tensor],
         edge_index_dict: dict,
+        edge_weight_dict: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         """Evaluation-time forward pass that disables dropout."""
         self.eval()
-        return self.forward(x_dict, edge_index_dict)
+        return self.forward(x_dict, edge_index_dict, edge_weight_dict)

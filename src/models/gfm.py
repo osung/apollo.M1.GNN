@@ -91,6 +91,7 @@ class GFMLayer(nn.Module):
         self,
         h_dict: dict[str, torch.Tensor],
         edge_index_dict: dict,
+        edge_weight_dict: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         out = {nt: self.w_self[nt](h_dict[nt]) for nt in self.node_types}
 
@@ -113,6 +114,14 @@ class GFMLayer(nn.Module):
             # Without this, w stays fp32 → m_e gets promoted to fp32 → scatter_add
             # into bf16 sum_msg fails with "self.dtype != src.dtype".
             w = w.to(x_src.dtype)
+            # Multiply by relation-specific edge weight (royalty=1.0, ..., sim=0.25
+            # by default) so high-priority edges propagate more signal per hop.
+            # When edge_weight_dict is None (e.g., loading legacy graph without
+            # edge_weight attr), falls back to uniform edge importance.
+            if edge_weight_dict is not None:
+                ew = edge_weight_dict.get(et)
+                if ew is not None:
+                    w = w * ew.to(x_src.dtype)
             m_e = x_src[row] * w.unsqueeze(-1)  # (E, d): weighted messages
 
             idx = col.unsqueeze(-1).expand(-1, d)
@@ -173,10 +182,11 @@ class GFMEncoder(nn.Module):
         self,
         x_dict: dict[str, torch.Tensor],
         edge_index_dict: dict,
+        edge_weight_dict: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         h_dict = {nt: self.input_proj[nt](x_dict[nt]) for nt in self.node_types}
         for layer in self.layers:
-            h_dict = layer(h_dict, edge_index_dict)
+            h_dict = layer(h_dict, edge_index_dict, edge_weight_dict)
         z_dict = {nt: self.output_proj[nt](h_dict[nt]) for nt in self.node_types}
         if self.normalize_output:
             z_dict = {k: F.normalize(z, p=2, dim=-1) for k, z in z_dict.items()}
@@ -187,6 +197,7 @@ class GFMEncoder(nn.Module):
         self,
         x_dict: dict[str, torch.Tensor],
         edge_index_dict: dict,
+        edge_weight_dict: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         self.eval()
-        return self.forward(x_dict, edge_index_dict)
+        return self.forward(x_dict, edge_index_dict, edge_weight_dict)
