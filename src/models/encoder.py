@@ -108,15 +108,21 @@ class GNNEncoder(nn.Module):
         edge_index_dict: dict,
         edge_weight_dict: dict | None = None,
     ) -> dict[str, torch.Tensor]:
-        # NOTE: edge_weight_dict is accepted for API consistency with the
-        # custom GFM/LightGCN/SeHGNN encoders, but currently unused here.
-        # SAGEConv/GATConv/HGTConv don't accept an edge_weight kwarg via
-        # HeteroConv; only GraphConv (gcn) does. Adding GCN-only weighted MP
-        # would require a separate per-relation forward path. Left as TODO.
-        del edge_weight_dict
+        # GCN's GraphConv accepts an edge_weight kwarg, so we forward the dict
+        # via HeteroConv's per-relation kwarg routing. SAGEConv/GATConv/HGTConv
+        # don't accept edge_weight, so we drop it for those layer types to
+        # avoid TypeError ("got an unexpected keyword argument 'edge_weight'").
+        pass_edge_weights = (
+            self.layer_type == "gcn" and edge_weight_dict is not None
+        )
         h_dict = {nt: self.input_proj[nt](x_dict[nt]) for nt in self.node_types}
         for layer in self.layers:
-            h_dict = layer(h_dict, edge_index_dict)
+            if pass_edge_weights:
+                h_dict = layer(
+                    h_dict, edge_index_dict, edge_weight_dict=edge_weight_dict
+                )
+            else:
+                h_dict = layer(h_dict, edge_index_dict)
             h_dict = {k: F.relu(h) for k, h in h_dict.items()}
             if self.training and self.dropout > 0:
                 h_dict = {k: F.dropout(h, p=self.dropout) for k, h in h_dict.items()}
