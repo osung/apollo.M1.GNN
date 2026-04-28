@@ -1,11 +1,17 @@
 """Parameter sweep driver for GNN experiments.
 
 Fixes one architecture (--model) and sweeps over:
-  - hard_count in {0, 5, 10, 20}     (number of hard negatives per positive)
-  - sim_count  in {0, 5, 10, 20}     (top-k similarity edges used for MP)
+  - hard_count in {0, 5, 10}          (number of hard negatives per positive)
+  - sim_count  in {0, 1, 3, 5, 10}    (top-k similarity edges used for MP)
   - direction  in {p2c_only, c2p_only, both}
 
-Total: 4 * 4 * 3 = 48 runs per invocation.
+Total: 3 * 5 * 3 = 45 runs per invocation.
+
+Note: hard_count=20 (all-hard, no random negatives) was dropped from the
+grid after observing catastrophic training collapse across SAGE/GCN/GFM
+(R@10 falling to ~0.01-0.03 — see SAGE/GCN sweep results). sim_count=20
+was dropped because (a) GFM h128 OOMs on the 24M sim edges and (b) prior
+sweeps showed sim=10 already past the sweet spot for SAGE/GCN.
 
 Each run is launched as a subprocess so OOM / crash in one run does not
 terminate the sweep. Results (final metrics + elapsed time + status) are
@@ -46,8 +52,8 @@ import pandas as pd
 
 
 RELATIONS = ("royalty", "commercial", "performance")
-HARD_COUNTS = (0, 5, 10, 20)
-SIM_COUNTS = (0, 1, 3, 5, 10, 20)
+HARD_COUNTS = (0, 5, 10)
+SIM_COUNTS = (0, 1, 3, 5, 10)
 DIRECTIONS = (
     ("p2c_only", 1.0, 0.0),
     ("c2p_only", 0.0, 1.0),
