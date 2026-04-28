@@ -47,7 +47,7 @@ import pandas as pd
 
 RELATIONS = ("royalty", "commercial", "performance")
 HARD_COUNTS = (0, 5, 10, 20)
-SIM_COUNTS = (0, 5, 10, 20)
+SIM_COUNTS = (0, 1, 3, 5, 10, 20)
 DIRECTIONS = (
     ("p2c_only", 1.0, 0.0),
     ("c2p_only", 0.0, 1.0),
