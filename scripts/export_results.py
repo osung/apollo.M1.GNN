@@ -188,6 +188,43 @@ main_rows = [
     _row("SeHGNN", 64, 2, 4, 0.8, 5, 1.0, "clean", "fp32", 200, 170, "peak_c2p",
          0.494, 0.422, 0.355, 0.325, 0.277, 0.223, 20.9, 140416,
          "SeHGNN hd=64 ep170 — peak c2p royalty for SeHGNN (0.325)"),
+    # ---- GFM (Graph Factorization Machine) - new architecture, current SOTA ----
+    # h128 num_layers=2 sim=10 hr=0 — initial GFM SOTA (single config first)
+    _row("GFM", 128, 2, "-", 0.0, 10, 1.0, "clean", "fp32", 300, 200, "first_sota",
+         0.5387, 0.4571, 0.3826, 0.5082, 0.4302, 0.3892, 23.3, 825344,
+         "GFM h128 2L sim=10 ep200 — first GFM SOTA; p2c royalty R@10 0.4676; beats SAGE/GCN at all metrics"),
+    _row("GFM", 128, 2, "-", 0.0, 10, 1.0, "clean", "fp32", 300, 235, "peak_p2c_R100",
+         0.5443, 0.4558, 0.3842, 0.5166, 0.4333, 0.3824, 23.3, 825344,
+         "GFM h128 2L sim=10 ep235 — p2c royalty R@100 peak (0.5443); NDCG@100 0.4220"),
+    _row("GFM", 128, 2, "-", 0.0, 10, 1.0, "clean", "fp32", 300, 260, "p2c_priority_champ",
+         0.5366, 0.4565, 0.3818, 0.5088, 0.4318, 0.3847, 23.3, 825344,
+         "GFM h128 2L sim=10 ep260 — p2c-priority champion: R@10 0.481 highest of all GFM"),
+    _row("GFM", 128, 2, "-", 0.0, 10, 1.0, "clean", "fp32", 300, 300, "final_2L_sim10",
+         0.5391, 0.4592, 0.3840, 0.4995, 0.4285, 0.3879, 23.3, 825344,
+         "GFM h128 2L sim=10 ep300 final; saturate after ep260"),
+    # h128 num_layers=3 sim=5 hr=0 — hop expansion experiment, BALANCED CHAMPION
+    _row("GFM", 128, 3, "-", 0.0, 5, 1.0, "clean", "fp32", 300, 195, "c2p_breakthrough",
+         0.5298, 0.4567, 0.3854, 0.5054, 0.4391, 0.3895, 25.4, 1237792,
+         "GFM h128 3L sim=5 ep195 — first c2p royalty R@10 over 0.40 (0.4041)"),
+    _row("GFM", 128, 3, "-", 0.0, 5, 1.0, "clean", "fp32", 300, 285, "balanced_champ",
+         0.5408, 0.4625, 0.4104, 0.5077, 0.4411, 0.3902, 25.4, 1237792,
+         "GFM h128 3L sim=5 ep285 — BALANCED CHAMPION (R@10 bal 0.383); beats 2L sim=10 ep260"),
+    _row("GFM", 128, 3, "-", 0.0, 5, 1.0, "clean", "fp32", 300, 295, "p2c_3L_peak",
+         0.5338, 0.4609, 0.3883, 0.5095, 0.4370, 0.3915, 25.4, 1237792,
+         "GFM h128 3L sim=5 ep295 — p2c royalty R@10 peak in 3L family (0.4733)"),
+    _row("GFM", 128, 3, "-", 0.0, 5, 1.0, "clean", "fp32", 300, 300, "ndcg_peak",
+         0.5335, 0.4619, 0.3833, 0.5103, 0.4479, 0.3890, 25.4, 1237792,
+         "GFM h128 3L sim=5 ep300 final — p2c royalty NDCG@100 peak (0.4351)"),
+    # h256 num_layers=2 sim=3 hr=0 — capacity expansion, did NOT beat 3L sim=5
+    _row("GFM", 256, 2, "-", 0.0, 3, 1.0, "clean", "fp32", 300, 190, "h256_R100_peak",
+         0.5403, 0.4577, 0.3842, 0.4849, 0.4260, 0.3855, 27.7, 2830080,
+         "GFM h256 2L sim=3 ep190 — h256 capacity p2c R@100 peak; NOT new SOTA"),
+    _row("GFM", 256, 2, "-", 0.0, 3, 1.0, "clean", "fp32", 300, 200, "h256_c2p_comm",
+         0.5371, 0.4594, 0.3847, 0.4995, 0.4276, 0.3893, 27.7, 2830080,
+         "GFM h256 2L sim=3 ep200 — c2p commercial R@10 peak (0.3232); only h256 contribution"),
+    _row("GFM", 256, 2, "-", 0.0, 3, 1.0, "clean", "fp32", 300, 225, "h256_p2c_R10_peak",
+         0.5371, 0.4587, 0.3840, 0.4951, 0.4281, 0.3834, 27.7, 2830080,
+         "GFM h256 2L sim=3 ep225 — h256 p2c royalty R@10 peak (0.4744); confirms 3.4x params yield no gain"),
 ]
 
 failed_rows = [
@@ -259,6 +296,19 @@ champion_rows = [
     {"metric": "p2c_royalty_GCN",     "best_value": 0.471, "setup": "GCN hd=256 clean ep130/145","context": "GCN hd=256 p2c peak; 2x fewer params than SAGE hd=384"},
     {"metric": "c2p_royalty_GCN",     "best_value": 0.367, "setup": "GCN hd=256 clean ep135/150","context": "GCN hd=256 c2p peak; beats SAGE hd=256"},
     {"metric": "c2p_commercial_GCN",  "best_value": 0.317, "setup": "GCN hd=256 clean ep135",    "context": "GCN hd=256 c2p commercial peak; beats SAGE hd=256 (0.302)"},
+    # --- GFM champions (NEW SOTA family) ---
+    {"metric": "p2c_royalty_R100_GFM",   "best_value": 0.5443, "setup": "GFM h128 2L sim=10 ep235",
+     "context": "GFM new SOTA; p2c royalty NDCG@100 0.4220, R@10 0.4812"},
+    {"metric": "p2c_royalty_R10_GFM",    "best_value": 0.4812, "setup": "GFM h128 2L sim=10 ep235/260",
+     "context": "GFM p2c-priority champion R@10; beats LightFM 0.4041 by +19.1%"},
+    {"metric": "c2p_royalty_R10_GFM",    "best_value": 0.4041, "setup": "GFM h128 3L sim=5 ep195",
+     "context": "First model to break c2p royalty R@10 0.40; +120% over LightFM (c2p native) 0.184"},
+    {"metric": "balanced_R10_GFM",       "best_value": 0.383,  "setup": "GFM h128 3L sim=5 ep285",
+     "context": "BALANCED CHAMPION; bidir avg R@10 = 0.383; beats all per-direction LightFM specialists"},
+    {"metric": "p2c_royalty_NDCG100_GFM","best_value": 0.4351, "setup": "GFM h128 3L sim=5 ep300",
+     "context": "p2c royalty NDCG@100 SOTA; +7.6% over 2L sim=10 ep260 (0.4044)"},
+    {"metric": "ablation_capacity_vs_hop","best_value": 0.0, "setup": "h256 sim=3 vs h128 3L sim=5",
+     "context": "3.4x params (h256) yielded no gain; +1 hop yielded +2.7% balanced — hop > capacity"},
 ]
 
 

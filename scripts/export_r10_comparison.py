@@ -46,11 +46,28 @@ r10_rows = [
     {"method": "GCN hd=256 ep185 (clean)", "type": "gnn-unified",
      "p2c_roy_R10": 0.3771, "p2c_com_R10": 0.3308, "p2c_per_R10": 0.2875,
      "c2p_roy_R10": 0.1588, "c2p_com_R10": 0.1132, "c2p_per_R10": 0.0961,
-     "notes": "Our balanced champion (recommended main model)"},
+     "notes": "Our balanced champion among GCN/SAGE (recommended main model among legacy GNNs)"},
     {"method": "GCN hd=256 ep135 (c2p peak)", "type": "gnn-unified",
      "p2c_roy_R10": 0.3264, "p2c_com_R10": 0.3164, "p2c_per_R10": 0.2766,
      "c2p_roy_R10": 0.1518, "c2p_com_R10": 0.1098, "c2p_per_R10": 0.1245,
      "notes": "GCN hd=256 ep135 peak on c2p commercial/performance"},
+    # ---- GFM family (NEW SOTA) ----
+    {"method": "GFM h128 2L sim=10 ep260 (p2c-priority)", "type": "gnn-unified-gfm",
+     "p2c_roy_R10": 0.4812, "p2c_com_R10": 0.4123, "p2c_per_R10": 0.3597,
+     "c2p_roy_R10": 0.3894, "c2p_com_R10": 0.3085, "c2p_per_R10": 0.2877,
+     "notes": "GFM 2L sim=10 ep260 — beats LightFM on every R@10 metric"},
+    {"method": "GFM h128 3L sim=5 ep285 (BALANCED CHAMPION)", "type": "gnn-unified-gfm",
+     "p2c_roy_R10": 0.4712, "p2c_com_R10": 0.4155, "p2c_per_R10": 0.3752,
+     "c2p_roy_R10": 0.3950, "c2p_com_R10": 0.3083, "c2p_per_R10": 0.3305,
+     "notes": "BALANCED CHAMPION (R@10 bal 0.383); recommended main model"},
+    {"method": "GFM h128 3L sim=5 ep195 (c2p royalty spike)", "type": "gnn-unified-gfm",
+     "p2c_roy_R10": 0.4639, "p2c_com_R10": 0.4099, "p2c_per_R10": 0.3599,
+     "c2p_roy_R10": 0.4041, "c2p_com_R10": 0.2844, "c2p_per_R10": 0.3247,
+     "notes": "c2p royalty R@10 first 0.40+ checkpoint (0.404)"},
+    {"method": "GFM h256 2L sim=3 ep200", "type": "gnn-unified-gfm",
+     "p2c_roy_R10": 0.4582, "p2c_com_R10": 0.4111, "p2c_per_R10": 0.3592,
+     "c2p_roy_R10": 0.3847, "c2p_com_R10": 0.3232, "c2p_per_R10": 0.2929,
+     "notes": "h256 capacity expansion — c2p commercial peak (0.3232)"},
 ]
 
 # NDCG@10 comparison rows (same setups, different metric)
@@ -79,6 +96,15 @@ ndcg10_rows = [
      "p2c_roy_N10": 0.2598, "p2c_com_N10": 0.2206, "p2c_per_N10": 0.1955,
      "c2p_roy_N10": 0.0858, "c2p_com_N10": 0.0590, "c2p_per_N10": 0.0522,
      "notes": ""},
+    # ---- GFM NDCG@10 ----
+    {"method": "GFM h128 2L sim=10 ep260", "type": "gnn-unified-gfm",
+     "p2c_roy_N10": 0.3927, "p2c_com_N10": 0.3422, "p2c_per_N10": 0.2989,
+     "c2p_roy_N10": 0.2459, "c2p_com_N10": 0.1830, "c2p_per_N10": 0.1776,
+     "notes": "GFM p2c-priority"},
+    {"method": "GFM h128 3L sim=5 ep285 (BALANCED)", "type": "gnn-unified-gfm",
+     "p2c_roy_N10": 0.3828, "p2c_com_N10": 0.3445, "p2c_per_N10": 0.3131,
+     "c2p_roy_N10": 0.2440, "c2p_com_N10": 0.1741, "c2p_per_N10": 0.2137,
+     "notes": "GFM balanced champion"},
 ]
 
 # Head-to-head: LightFM dual vs GCN
@@ -99,10 +125,37 @@ h2h_rows = [
 ]
 
 
+# Head-to-head: LightFM dual vs GFM (NEW main contribution)
+h2h_gfm_rows = [
+    # R@10: GFM wins ALL six
+    {"metric": "p2c_royalty R@10",       "LightFM_best": 0.4041, "GFM_3L_sim5_ep285": 0.4712, "gap_pct": "+16.6% (GFM WIN)"},
+    {"metric": "p2c_commercial R@10",    "LightFM_best": 0.3343, "GFM_3L_sim5_ep285": 0.4155, "gap_pct": "+24.3% (GFM WIN)"},
+    {"metric": "p2c_performance R@10",   "LightFM_best": 0.3428, "GFM_3L_sim5_ep285": 0.3752, "gap_pct": "+9.5% (GFM WIN)"},
+    {"metric": "c2p_royalty R@10",       "LightFM_best": 0.1835, "GFM_3L_sim5_ep285": 0.3950, "gap_pct": "+115.3% (GFM WIN)"},
+    {"metric": "c2p_commercial R@10",    "LightFM_best": 0.1358, "GFM_3L_sim5_ep285": 0.3083, "gap_pct": "+127.0% (GFM WIN)"},
+    {"metric": "c2p_performance R@10",   "LightFM_best": 0.1617, "GFM_3L_sim5_ep285": 0.3305, "gap_pct": "+104.4% (GFM WIN)"},
+    # NDCG@10: GFM wins ALL six (no exception)
+    {"metric": "p2c_royalty NDCG@10",    "LightFM_best": 0.2535, "GFM_3L_sim5_ep285": 0.3828, "gap_pct": "+51.0% (GFM WIN)"},
+    {"metric": "p2c_commercial NDCG@10", "LightFM_best": 0.2083, "GFM_3L_sim5_ep285": 0.3445, "gap_pct": "+65.4% (GFM WIN)"},
+    {"metric": "p2c_performance NDCG@10","LightFM_best": 0.2254, "GFM_3L_sim5_ep285": 0.3131, "gap_pct": "+38.9% (GFM WIN)"},
+    {"metric": "c2p_royalty NDCG@10",    "LightFM_best": 0.0937, "GFM_3L_sim5_ep285": 0.2440, "gap_pct": "+160.4% (GFM WIN)"},
+    {"metric": "c2p_commercial NDCG@10", "LightFM_best": 0.0688, "GFM_3L_sim5_ep285": 0.1741, "gap_pct": "+153.1% (GFM WIN)"},
+    {"metric": "c2p_performance NDCG@10","LightFM_best": 0.0855, "GFM_3L_sim5_ep285": 0.2137, "gap_pct": "+149.9% (GFM WIN)"},
+    # R@100 deep-list: LightFM still wins p2c, GFM wins c2p
+    {"metric": "p2c_royalty R@100",      "LightFM_best": 0.5854, "GFM_3L_sim5_ep285": 0.5408, "gap_pct": "-7.6% (LightFM)"},
+    {"metric": "p2c_commercial R@100",   "LightFM_best": 0.5094, "GFM_3L_sim5_ep285": 0.4625, "gap_pct": "-9.2% (LightFM)"},
+    {"metric": "p2c_performance R@100",  "LightFM_best": 0.5236, "GFM_3L_sim5_ep285": 0.4104, "gap_pct": "-21.6% (LightFM)"},
+    {"metric": "c2p_royalty R@100",      "LightFM_best": 0.4595, "GFM_3L_sim5_ep285": 0.5077, "gap_pct": "+10.5% (GFM WIN)"},
+    {"metric": "c2p_commercial R@100",   "LightFM_best": 0.3789, "GFM_3L_sim5_ep285": 0.4411, "gap_pct": "+16.4% (GFM WIN)"},
+    {"metric": "c2p_performance R@100",  "LightFM_best": 0.3507, "GFM_3L_sim5_ep285": 0.3902, "gap_pct": "+11.3% (GFM WIN)"},
+]
+
+
 def main() -> None:
     df_r10 = pd.DataFrame(r10_rows)
     df_ndcg10 = pd.DataFrame(ndcg10_rows)
     df_h2h = pd.DataFrame(h2h_rows)
+    df_h2h_gfm = pd.DataFrame(h2h_gfm_rows)
 
     # Add avg columns
     df_r10["p2c_avg"] = df_r10[
@@ -123,6 +176,7 @@ def main() -> None:
         df_r10.to_excel(w, sheet_name="recall@10", index=False)
         df_ndcg10.to_excel(w, sheet_name="ndcg@10", index=False)
         df_h2h.to_excel(w, sheet_name="head2head_LightFM_vs_GCN", index=False)
+        df_h2h_gfm.to_excel(w, sheet_name="head2head_LightFM_vs_GFM", index=False)
 
     print(f"[r10] wrote {OUT}")
     print(f"  recall@10               : {len(df_r10)} methods")
