@@ -87,6 +87,20 @@ def _load_node_maps(path: Path) -> tuple[list[str], list[str]]:
     return list(nm["project_ids"]), list(nm["company_ids"])
 
 
+def _extract_model_tag(z_path: str) -> str:
+    """Extract the experiment tag from a 'project_z_<TAG>.npy' filename.
+
+    Example:
+        project_z_gfm_h128_l3_hr00_c2p100_sim5_nonorm_epoch285.npy
+        -> 'gfm_h128_l3_hr00_c2p100_sim5_nonorm_epoch285'
+    """
+    name = Path(z_path).stem  # strip .npy
+    for prefix in ("project_z_", "company_z_"):
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name  # fallback: use whole stem if prefix unfamiliar
+
+
 def _load_edge_pairs(
     paths_yaml: dict, side: str = "both"
 ) -> tuple[set, set]:
@@ -185,6 +199,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--out-prefix", default="match_top10",
+        help="leading filename component (default: match_top10). The model "
+             "tag (extracted from --project-z filename) and top-percent are "
+             "appended automatically, so a typical output looks like "
+             "'match_top10_p2c__gfm_h128_l3_..._epoch285__top10pct.pkl'.",
     )
     parser.add_argument(
         "--batch", type=int, default=512,
@@ -268,6 +286,12 @@ def main() -> None:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Build a filename-safe suffix that captures model + percent so multiple
+    # runs with different checkpoints / fractions don't clobber each other.
+    model_tag = _extract_model_tag(args.project_z)
+    pct_tag = f"top{int(round(args.top_percent * 100))}pct"
+    name_suffix = f"{model_tag}__{pct_tag}"
+
     # ---- p2c (project queries → company candidates) ----
     if args.direction in ("p2c", "both"):
         print(f"\n[match] === p2c top-{args.topk} retrieval ===")
@@ -304,8 +328,8 @@ def main() -> None:
             f"in_commercial hits = {n_com_hits:,}"
         )
 
-        pkl_path = out_dir / f"{args.out_prefix}_p2c.pkl"
-        xlsx_path = out_dir / f"{args.out_prefix}_p2c.xlsx"
+        pkl_path = out_dir / f"{args.out_prefix}_p2c__{name_suffix}.pkl"
+        xlsx_path = out_dir / f"{args.out_prefix}_p2c__{name_suffix}.xlsx"
         df_p2c.to_pickle(pkl_path)
         df_p2c.to_excel(xlsx_path, index=False, engine="openpyxl")
         print(f"  saved {pkl_path} ({len(df_p2c):,} rows)")
@@ -347,8 +371,8 @@ def main() -> None:
             f"in_commercial hits = {n_com_hits:,}"
         )
 
-        pkl_path = out_dir / f"{args.out_prefix}_c2p.pkl"
-        xlsx_path = out_dir / f"{args.out_prefix}_c2p.xlsx"
+        pkl_path = out_dir / f"{args.out_prefix}_c2p__{name_suffix}.pkl"
+        xlsx_path = out_dir / f"{args.out_prefix}_c2p__{name_suffix}.xlsx"
         df_c2p.to_pickle(pkl_path)
         df_c2p.to_excel(xlsx_path, index=False, engine="openpyxl")
         print(f"  saved {pkl_path} ({len(df_c2p):,} rows)")
