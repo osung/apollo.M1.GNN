@@ -34,6 +34,7 @@ from src.graph.schema import (
     NODE_TYPE_COMPANY,
     NODE_TYPE_PROJECT,
 )
+from src.models.compgcn import CompGCNEncoder
 from src.models.encoder import GNNEncoder
 from src.models.gfm import GFMEncoder
 from src.models.lightgcn import LightGCNEncoder
@@ -441,6 +442,16 @@ def main() -> None:
         )
     elif layer_type == "srhgn":
         model = SRHGNEncoder(
+            input_dim=input_dim,
+            hidden_dim=int(args.hidden_dim or gnn_cfg["hidden_dim"]),
+            output_dim=int(args.output_dim or gnn_cfg["output_dim"]),
+            num_layers=int(args.num_layers or gnn_cfg["num_layers"]),
+            metadata=graph.metadata(),
+            dropout=float(gnn_cfg.get("dropout", 0.1)),
+            normalize_output=not args.no_normalize,
+        )
+    elif layer_type == "compgcn":
+        model = CompGCNEncoder(
             input_dim=input_dim,
             hidden_dim=int(args.hidden_dim or gnn_cfg["hidden_dim"]),
             output_dim=int(args.output_dim or gnn_cfg["output_dim"]),
