@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -48,6 +49,51 @@ class TrainResult:
     history: list[dict]
 
 
+def supervised_pair_ids(
+    edge_index_dict: dict,
+    relation_names: Iterable[str],
+    src_node_type: str,
+    dst_node_type: str,
+    n_dst: int,
+) -> dict:
+    """Per supervised relation (and its `rev_` twin): id = src_idx * n_dst + dst_idx
+    of every message-passing edge, so a batch's positive pairs can be located."""
+    names = set(relation_names)
+    out = {}
+    for et, ei in edge_index_dict.items():
+        s, rel, d = et
+        if rel.removeprefix("rev_") not in names:
+            continue
+        if s == src_node_type and d == dst_node_type:
+            out[et] = ei[0] * n_dst + ei[1]
+        elif s == dst_node_type and d == src_node_type:
+            out[et] = ei[1] * n_dst + ei[0]
+    return out
+
+
+def drop_batch_edges(
+    edge_index_dict: dict,
+    pair_ids: dict,
+    batch_ids: torch.Tensor,
+    edge_weight_dict: dict | None = None,
+) -> tuple[dict, dict | None]:
+    """Remove the batch's positive (src, dst) pairs from message passing, in every
+    supervised relation and direction.
+
+    Without this, a pair being scored is also a direct neighbor during encoding, so
+    an expressive encoder can score training pairs from that edge itself — a signal
+    that is absent for held-out pairs at inference time.
+    """
+    ei_out = dict(edge_index_dict)
+    ew_out = dict(edge_weight_dict) if edge_weight_dict is not None else None
+    for et, pid in pair_ids.items():
+        keep = ~torch.isin(pid, batch_ids)
+        ei_out[et] = edge_index_dict[et][:, keep]
+        if ew_out is not None and et in ew_out:
+            ew_out[et] = edge_weight_dict[et][keep]
+    return ei_out, ew_out
+
+
 def train_encoder(
     *,
     model: nn.Module,
@@ -67,6 +113,7 @@ def train_encoder(
     c2p_weight: float = 0.0,
     amp_dtype: str = "none",
     use_mp_edge_weights: bool = False,
+    mask_batch_edges: bool = False,
 ) -> TrainResult:
     if amp_dtype not in _AMP_DTYPES:
         raise ValueError(
@@ -101,6 +148,13 @@ def train_encoder(
         if not edge_weight_dict:
             edge_weight_dict = None
 
+    n_dst = x_dict[dst_node_type].shape[0]
+    pair_ids = (
+        supervised_pair_ids(edge_index_dict, sampler.relation_names,
+                            src_node_type, dst_node_type, n_dst)
+        if mask_batch_edges else {}
+    )
+
     history = list(history) if history else []
     for epoch in range(start_epoch, epochs + 1):
         model.train()
@@ -117,16 +171,21 @@ def train_encoder(
             # log-sigmoid and score accumulation stay in fp32. Autocast
             # still unwinds backward correctly — gradients land on fp32
             # parameters regardless.
-            with _amp_context(device, amp_dtype):
-                z_dict = model(x_dict, edge_index_dict, edge_weight_dict)
-
-            if amp_dtype != "none":
-                z_dict = {k: v.float() for k, v in z_dict.items()}
-
             pos_src = batch.pos_src.to(device)
             pos_dst = batch.pos_dst.to(device)
             neg_dst = batch.neg_dst.to(device)
             weights = batch.weights.to(device)
+
+            step_ei, step_ew = edge_index_dict, edge_weight_dict
+            if pair_ids:
+                step_ei, step_ew = drop_batch_edges(
+                    edge_index_dict, pair_ids, pos_src * n_dst + pos_dst, edge_weight_dict
+                )
+            with _amp_context(device, amp_dtype):
+                z_dict = model(x_dict, step_ei, step_ew)
+
+            if amp_dtype != "none":
+                z_dict = {k: v.float() for k, v in z_dict.items()}
 
             z_src = z_dict[src_node_type][pos_src]             # (B, D)
             z_pos = z_dict[dst_node_type][pos_dst]             # (B, D)

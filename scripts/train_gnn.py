@@ -27,12 +27,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.eval.ranking import evaluate, group_ground_truth
+from src.graph.aux_edges import drop_pairs
 from src.graph.schema import (
     EDGE_COMMERCIAL,
     EDGE_PERFORMANCE,
     EDGE_ROYALTY,
     NODE_TYPE_COMPANY,
     NODE_TYPE_PROJECT,
+    OBSERVED_EDGE_TYPES,
+    pair_keys,
 )
 from src.models.compgcn import CompGCNEncoder
 from src.models.encoder import GNNEncoder
@@ -83,6 +86,9 @@ def _build_experiment_tag(
     no_normalize: bool,
     amp_dtype: str,
     mp_edge_weights: bool = False,
+    warm_neg_ratio: float = 0.0,
+    mask_batch_edges: bool = False,
+    graph_extras: tuple[str, ...] = (),
 ) -> str:
     """Build a collision-free filename tag that reflects the hyperparameters
     a user is most likely to vary across parallel runs.
@@ -123,6 +129,14 @@ def _build_experiment_tag(
     # Mark only when MP edge weights are enabled (default: disabled, no marker)
     if mp_edge_weights:
         parts.append("mpw")
+
+    # Only marked when enabled, so earlier runs keep their tags
+    if warm_neg_ratio > 0.0:
+        parts.append(f"wn{int(round(warm_neg_ratio * 100)):02d}")
+    if mask_batch_edges:
+        parts.append("mbe")
+    # extra relations in the graph: pat (patent), kw (keyword), inh (inherited)
+    parts.extend(graph_extras)
 
     return "_".join(parts)
 
@@ -187,11 +201,62 @@ def _attach_similarity_edges(graph, graph_cfg: dict, override_path: str | None) 
 
 
 def _training_edges(graph) -> dict[str, np.ndarray]:
+    """Supervised (BPR positive) relations: every observed relation in the graph,
+    i.e. the three evaluated ones plus `patent` when the graph was built with it."""
     edges: dict[str, np.ndarray] = {}
-    for et in REAL_EDGE_TYPES:
+    for et in OBSERVED_EDGE_TYPES:
         rel = (NODE_TYPE_PROJECT, et, NODE_TYPE_COMPANY)
-        edges[et] = graph[rel].edge_index.numpy()
+        if rel in graph.edge_types:
+            edges[et] = graph[rel].edge_index.numpy()
     return edges
+
+
+def _held_out_keys(held_out, n_company: int) -> np.ndarray:
+    keys = [
+        pair_keys(held_out[(NODE_TYPE_PROJECT, et, NODE_TYPE_COMPANY)].edge_index.numpy(),
+                  n_company)
+        for et in REAL_EDGE_TYPES
+    ]
+    return np.unique(np.concatenate(keys))
+
+
+def _attach_aux_edges(graph, graph_cfg: dict, name: str, path: str,
+                      held_out_keys: np.ndarray | None) -> None:
+    """Add a derived (project, <name>, company) relation + reverse for message passing.
+
+    Like similarity edges these are never BPR positives. Pairs equal to a held-out
+    pair are removed (held_out_keys) so that an evaluated pair is never a direct
+    message-passing neighbor, the same as training pairs.
+    """
+    cache = Path(path)
+    if not cache.exists():
+        raise FileNotFoundError(f"{name} edge cache not found: {cache} "
+                                f"(run scripts/build_aux_edges.py --kind {name})")
+    z = np.load(cache)
+    ei = np.ascontiguousarray(z["edge_index"]).astype(np.int64)
+    n_p, n_c = graph[NODE_TYPE_PROJECT].num_nodes, graph[NODE_TYPE_COMPANY].num_nodes
+    if (int(z["n_project"]), int(z["n_company"])) != (n_p, n_c):
+        raise ValueError(f"{cache} was built for a different graph; rebuild it.")
+    n_removed = 0
+    if held_out_keys is not None:
+        ei, n_removed = drop_pairs(ei, n_c, held_out_keys)
+    _set_relation(graph, graph_cfg, name, ei)
+    print(f"[train_gnn] added {name} edges: |E|={ei.shape[1]:,}  "
+          f"(removed {n_removed:,} equal to held-out pairs)")
+
+
+def _set_relation(graph, graph_cfg: dict, name: str, ei: np.ndarray) -> None:
+    edge_index = torch.from_numpy(np.ascontiguousarray(ei))
+    weight = float(graph_cfg.get("edge_types", {}).get(name, {}).get("weight", 0.25))
+    as_attr = bool(graph_cfg.get("edge_weights_as_attr", True))
+    rels = [((NODE_TYPE_PROJECT, name, NODE_TYPE_COMPANY), edge_index)]
+    if bool(graph_cfg.get("reverse_edges", {}).get("enabled", True)):
+        rels.append(((NODE_TYPE_COMPANY, f"rev_{name}", NODE_TYPE_PROJECT),
+                     edge_index.flip(0).contiguous()))
+    for rel, e in rels:
+        graph[rel].edge_index = e
+        if as_attr:
+            graph[rel].edge_weight = torch.full((e.shape[1],), weight, dtype=torch.float32)
 
 
 def _evaluate_z(
@@ -371,6 +436,21 @@ def main() -> None:
              "--mp-edge-weights to enable. When enabled, the experiment tag "
              "gets a '_mpw' suffix to keep checkpoints distinct from legacy runs.",
     )
+    parser.add_argument(
+        "--with-aux", nargs="*", default=[], choices=["keyword", "inherited"],
+        help="derived project-company relations to add for message passing "
+             "(caches from scripts/build_aux_edges.py; see graph.yaml auxiliary_edges)",
+    )
+    parser.add_argument(
+        "--warm-neg-ratio", type=float, default=None,
+        help="share of the random negatives drawn from warm nodes (>=1 training edge) "
+             "instead of all nodes; overrides train.yaml gnn.warm_neg_ratio. Tag gets '_wnNN'.",
+    )
+    parser.add_argument(
+        "--mask-batch-edges", action=argparse.BooleanOptionalAction, default=None,
+        help="remove each batch's positive pairs from message passing while they are "
+             "being scored; overrides train.yaml gnn.mask_batch_edges. Tag gets '_mbe'.",
+    )
     args = parser.parse_args()
 
     paths = load_yaml(args.paths)
@@ -394,8 +474,24 @@ def main() -> None:
             print(f"[train_gnn] casting {nt}.x {x.dtype} -> torch.float32")
             graph[nt].x = x.float()
 
+    aux_cfg = graph_cfg.get("auxiliary_edges", {}) or {}
+    n_company = graph[NODE_TYPE_COMPANY].num_nodes
+    ho_keys = (
+        _held_out_keys(held_out, n_company)
+        if bool(aux_cfg.get("drop_held_out_pairs", True)) else None
+    )
     if args.with_similarity:
         _attach_similarity_edges(graph, graph_cfg, args.sim_path)
+        if ho_keys is not None:
+            rel = (NODE_TYPE_PROJECT, SIM_EDGE_TYPE, NODE_TYPE_COMPANY)
+            ei, n_removed = drop_pairs(graph[rel].edge_index.numpy(), n_company, ho_keys)
+            _set_relation(graph, graph_cfg, SIM_EDGE_TYPE, ei)
+            print(f"[train_gnn] similarity edges: removed {n_removed:,} equal to held-out "
+                  f"pairs -> |E|={ei.shape[1]:,}")
+    for name in args.with_aux:
+        if name not in aux_cfg:
+            raise SystemExit(f"auxiliary_edges.{name} is not configured in {args.graph_cfg}")
+        _attach_aux_edges(graph, graph_cfg, name, aux_cfg[name]["cache_path"], ho_keys)
 
     layer_type = (args.layer_type or model_cfg["gnn"].get("type", "sage")).lower()
     gnn_cfg = model_cfg["gnn"]
@@ -488,6 +584,14 @@ def main() -> None:
     wd = float(tr_cfg.get("weight_decay", 0.0))
     bs = int(args.batch_size or tr_cfg["batch_size"])
     num_neg = int(args.num_neg or tr_cfg.get("num_neg_samples", 5))
+    warm_neg_ratio = float(
+        args.warm_neg_ratio if args.warm_neg_ratio is not None
+        else tr_cfg.get("warm_neg_ratio", 0.0)
+    )
+    mask_batch_edges = bool(
+        args.mask_batch_edges if args.mask_batch_edges is not None
+        else tr_cfg.get("mask_batch_edges", False)
+    )
 
     hard_neg_map: dict[int, np.ndarray] | None = None
     if args.hard_neg_path:
@@ -518,9 +622,12 @@ def main() -> None:
         print(f"[train_gnn]   c2p training auto-enabled (c2p_weight=1.0)")
 
     relation_weights = {
-        et: float(graph_cfg["edge_types"][et]["weight"]) for et in REAL_EDGE_TYPES
+        et: float(graph_cfg["edge_types"][et]["weight"]) for et in OBSERVED_EDGE_TYPES
+        if et in graph_cfg["edge_types"]
     }
     training_edges = _training_edges(graph)
+    print("[train_gnn] supervised relations: "
+          + ", ".join(f"{et}={e.shape[1]:,}" for et, e in training_edges.items()))
     sampler = EdgeSampler(
         edges_per_relation=training_edges,
         relation_weights=relation_weights,
@@ -533,6 +640,7 @@ def main() -> None:
         hard_neg_map_c2p=hard_neg_map_c2p,
         hard_ratio=args.hard_ratio,
         c2p_enabled=c2p_enabled,
+        warm_neg_ratio=warm_neg_ratio,
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
 
@@ -542,7 +650,8 @@ def main() -> None:
         f"n_random={sampler.n_random}; "
         f"c2p enabled={sampler.c2p_enabled}, weight={c2p_weight}, "
         f"n_hard={sampler.n_hard_c2p}, n_random={sampler.n_random_c2p}) "
-        f"lr={lr} wd={wd} device={args.device}"
+        f"lr={lr} wd={wd} device={args.device} "
+        f"warm_neg_ratio={warm_neg_ratio} mask_batch_edges={mask_batch_edges}"
     )
 
     start_epoch = 1
@@ -581,6 +690,12 @@ def main() -> None:
         no_normalize=args.no_normalize,
         amp_dtype=args.amp_dtype,
         mp_edge_weights=args.mp_edge_weights,
+        warm_neg_ratio=warm_neg_ratio,
+        mask_batch_edges=mask_batch_edges,
+        graph_extras=tuple(
+            short for name, short in (("patent", "pat"), ("keyword", "kw"), ("inherited", "inh"))
+            if (NODE_TYPE_PROJECT, name, NODE_TYPE_COMPANY) in graph.edge_types
+        ),
     )
     print(f"[train_gnn] experiment tag: {tag}")
     if args.mp_edge_weights:
@@ -661,6 +776,7 @@ def main() -> None:
         c2p_weight=c2p_weight,
         amp_dtype=args.amp_dtype,
         use_mp_edge_weights=args.mp_edge_weights,
+        mask_batch_edges=mask_batch_edges,
     )
 
     # Final z saves: keep the paths.yaml defaults but append tag so parallel

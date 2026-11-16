@@ -8,6 +8,13 @@ gnn:
   num_neg_samples: 5
   loss: weighted_bpr
   early_stopping_patience: 5
+  # 무작위 음성 중 "학습 간선이 있는 노드(warm)" 에서 뽑는 비율. 0.0 = 전체 노드에서 균등 추출.
+  # 양성 기업은 항상 warm 인데 기업의 약 95% 는 간선이 없어서, 0.0 이면 모델이 warm/cold 구분만으로
+  # 손실을 낮출 수 있다.
+  warm_neg_ratio: 0.0
+  # 배치의 양성 쌍을 그 스텝의 메시지 전파 간선에서 제외할지 여부.
+  # 끄면 점수를 매기는 쌍이 인코딩 때 직접 이웃으로도 주어진다.
+  mask_batch_edges: false
   # held_out split은 graph.yaml에서 관리 (빌드 시점에 그래프 아티팩트와 함께 고정)
 
 projection_mlp:

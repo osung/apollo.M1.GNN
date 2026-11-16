@@ -47,7 +47,15 @@ class EdgeSampler:
         n_src: int | None = None,
         hard_neg_map_c2p: dict[int, np.ndarray] | None = None,
         c2p_enabled: bool = False,
+        warm_neg_ratio: float = 0.0,
     ):
+        if not 0.0 <= warm_neg_ratio <= 1.0:
+            raise ValueError(f"warm_neg_ratio must be in [0, 1], got {warm_neg_ratio}")
+        # Share of the *random* negatives drawn from warm nodes (nodes with at least
+        # one training edge) instead of from all nodes. Positives are always warm
+        # while ~95% of companies are cold, so uniform negatives let a model reach a
+        # low loss by separating warm from cold nodes without ranking within them.
+        self.warm_neg_ratio = float(warm_neg_ratio)
         self.n_dst = n_dst
         self.n_src = int(n_src) if n_src else 0
         self.num_neg = num_neg
@@ -87,9 +95,22 @@ class EdgeSampler:
         self.wt = np.concatenate(wt_parts)
         self.rel = np.concatenate(rel_parts)
         self.n_edges = self.src.shape[0]
+        self.warm_src = np.unique(self.src)
+        self.warm_dst = np.unique(self.dst)
 
     def __len__(self) -> int:
         return (self.n_edges + self.batch_size - 1) // self.batch_size
+
+    def _random_negs(self, n_rows: int, k: int, n_candidates: int,
+                     warm_pool: np.ndarray) -> np.ndarray:
+        """(n_rows, k) uniform negatives; the first round(k * warm_neg_ratio) columns
+        are re-drawn uniformly from `warm_pool`."""
+        neg = self.rng.integers(0, n_candidates, size=(n_rows, k)).astype(np.int64)
+        n_warm = int(round(k * self.warm_neg_ratio))
+        if n_warm > 0 and warm_pool.size > 0:
+            pick = self.rng.integers(0, warm_pool.size, size=(n_rows, n_warm))
+            neg[:, :n_warm] = warm_pool[pick]
+        return neg
 
     def _sample_negs_one_side(
         self,
@@ -98,18 +119,15 @@ class EdgeSampler:
         hard_map: dict[int, np.ndarray],
         n_hard: int,
         n_random: int,
+        warm_pool: np.ndarray,
     ) -> np.ndarray:
         B = queries.shape[0]
         if n_hard == 0:
-            return self.rng.integers(
-                0, n_candidates, size=(B, self.num_neg)
-            ).astype(np.int64)
+            return self._random_negs(B, self.num_neg, n_candidates, warm_pool)
 
         neg = np.empty((B, self.num_neg), dtype=np.int64)
         if n_random > 0:
-            neg[:, n_hard:] = self.rng.integers(
-                0, n_candidates, size=(B, n_random)
-            )
+            neg[:, n_hard:] = self._random_negs(B, n_random, n_candidates, warm_pool)
         for i, q in enumerate(queries.tolist()):
             pool = hard_map.get(int(q))
             if pool is None or pool.size == 0:
@@ -128,12 +146,13 @@ class EdgeSampler:
 
             neg_dst = self._sample_negs_one_side(
                 srcs, self.n_dst, self.hard_neg_map, self.n_hard, self.n_random,
+                self.warm_dst,
             )
             neg_src = None
             if self.c2p_enabled:
                 neg_src = self._sample_negs_one_side(
                     dsts, self.n_src, self.hard_neg_map_c2p,
-                    self.n_hard_c2p, self.n_random_c2p,
+                    self.n_hard_c2p, self.n_random_c2p, self.warm_src,
                 )
 
             yield EdgeBatch(

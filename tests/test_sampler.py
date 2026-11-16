@@ -198,3 +198,56 @@ def test_sampler_c2p_enabled_requires_n_src():
             c2p_enabled=True,
             # n_src omitted -> should raise
         )
+
+
+def test_warm_negatives_come_from_nodes_with_training_edges():
+    edges = {"royalty": np.array([[0, 1, 2, 3], [10, 11, 12, 13]], dtype=np.int64),
+             "commercial": np.array([[4, 5], [14, 15]], dtype=np.int64)}
+    weights = {"royalty": 1.0, "commercial": 0.5}
+    warm = set(range(10, 16))
+    s = EdgeSampler(edges_per_relation=edges, relation_weights=weights, n_dst=10_000,
+                    num_neg=4, batch_size=6, seed=0, warm_neg_ratio=1.0)
+    for b in s.iter_epoch():
+        assert set(b.neg_dst.numpy().ravel().tolist()) <= warm
+
+    # half warm: the first two columns are warm, the rest uniform over all nodes
+    s = EdgeSampler(edges_per_relation=edges, relation_weights=weights, n_dst=10_000,
+                    num_neg=4, batch_size=6, seed=0, warm_neg_ratio=0.5)
+    b = next(iter(s.iter_epoch()))
+    assert set(b.neg_dst[:, :2].numpy().ravel().tolist()) <= warm
+    assert not set(b.neg_dst[:, 2:].numpy().ravel().tolist()) <= warm
+
+
+def test_warm_ratio_zero_keeps_previous_sampling():
+    a = next(iter(_sampler(seed=3).iter_epoch()))
+    rng = np.random.default_rng(3)
+    rng.permutation(6)
+    expect = rng.integers(0, 100, size=(5, 3))
+    assert (a.neg_dst.numpy() == expect).all()
+
+
+def test_drop_batch_edges_removes_pairs_in_both_directions():
+    import torch
+
+    from src.training.trainer import drop_batch_edges, supervised_pair_ids
+
+    n_dst = 100
+    fwd = torch.tensor([[0, 1, 2, 2], [10, 11, 12, 13]])
+    ei = {
+        ("project", "royalty", "company"): fwd,
+        ("company", "rev_royalty", "project"): fwd.flip(0),
+        ("project", "commercial", "company"): torch.tensor([[2, 5], [12, 15]]),
+        ("project", "similarity", "company"): torch.tensor([[2], [12]]),
+    }
+    ew = {("project", "royalty", "company"): torch.tensor([1.0, 2.0, 3.0, 4.0])}
+    ids = supervised_pair_ids(ei, ["royalty", "commercial"], "project", "company", n_dst)
+    assert ("project", "similarity", "company") not in ids
+
+    batch = torch.tensor([2 * n_dst + 12])           # the pair (project 2, company 12)
+    out, w = drop_batch_edges(ei, ids, batch, ew)
+    assert out[("project", "royalty", "company")].tolist() == [[0, 1, 2], [10, 11, 13]]
+    assert out[("company", "rev_royalty", "project")].tolist() == [[10, 11, 13], [0, 1, 2]]
+    assert out[("project", "commercial", "company")].tolist() == [[5], [15]]   # other relation too
+    assert out[("project", "similarity", "company")].tolist() == [[2], [12]]   # untouched
+    assert w[("project", "royalty", "company")].tolist() == [1.0, 2.0, 4.0]
+    assert ei[("project", "royalty", "company")].shape[1] == 4                 # input not modified
