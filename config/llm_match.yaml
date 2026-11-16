@@ -1,0 +1,41 @@
+# pro-sroberta 임베딩 후보 검색 + LLM 적합도 채점(재랭킹) 비교 실험.
+# ~/work/apollo 의 과제↔기업 매칭 파이프라인과 동일한 채점 규격을 held-out 간선 평가에 적용한다.
+
+# 문서 텍스트 원천. 설명문(with_desc)에 없는 노드는 raw 테이블의 이름·키워드만으로 문서를 만든다.
+texts:
+  project_desc: data/source/public_RnD_embeddings_pro_with_desc_260708.pkl
+  company_desc: data/source/company_embeddings_pro_260514_with_desc_ksic.pkl
+  # 과제 설명문에는 수행기관명이 그대로 적혀 있다("(주)A에서 수행하는 이 과제는 …").
+  # 그대로 두면 LLM 이 업체명 일치만으로 정답(특히 수행 관계)을 맞히므로, 해당 과제와
+  # 간선으로 연결된 기업의 이름을 과제 문서에서 ○○○ 로 가린다.
+  mask_linked_company_names: true
+
+output_dir: data/processed/llm_match
+
+queries:
+  directions: [p2c]            # p2c | c2p (둘 다 가능)
+  max_per_relation: 500        # 관계별 held-out 쿼리 표본 수. null 이면 전체
+  seed: 42
+
+candidates:
+  topn: 100                    # LLM 이 채점할 임베딩 상위 후보 수 (>= eval k 의 최댓값)
+  # 후보 점수 = (1 - promise_weight) * cos + promise_weight * 유망성점수/100
+  # 0.0 = 순수 pro-sroberta 코사인. apollo 납품 파이프라인은 0.4 를 쓴다.
+  promise_weight: 0.0
+  device: cpu
+  batch_size: 512
+
+llm:
+  image: vllm-apollo:latest
+  model: Qwen/Qwen3.6-35B-A3B-FP8
+  batch: 20                    # 프롬프트 1건당 후보 수
+  retry_batch: 10              # 응답 누락 후보 재시도 묶음 크기
+  max_tokens: 3500
+  max_model_len: 24576
+  max_num_seqs: 16
+  gpu_mem_util: 0.70           # GB10 운영 정책: 권장 0.70
+  gpu_mem_util_cap: 0.85       # 하드캡
+  chunk: 64                    # 한 번에 generate 에 넘기는 프롬프트 수 (체크포인트 단위)
+
+eval:
+  ks: [10, 100]
