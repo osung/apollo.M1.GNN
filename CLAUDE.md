@@ -92,7 +92,7 @@
 - `make train-coldstart` — projection MLP 학습 (GNN 학습 완료 후 실행)
 - `make index` — 학습된 임베딩으로 FAISS 인덱스 빌드
 - `make eval` — held-out 간선에 대한 Hits / NDCG / Recall (@10, @100)
-- `make llm-prepare` / `make llm-score` / `make llm-eval` — pro-sroberta 임베딩 + LLM 매칭 비교 실험 (`config/llm_match.yaml`, 상세는 docs/evaluation.md)
+- `make llm-prepare` / `make llm-score` / `make llm-eval` — 검색 모델(bge-m3 임베딩 · LightGCN · HGT · LightFM) + LLM 매칭 비교 실험 (`config/llm_match.yaml`, 상세는 docs/evaluation.md)
 - `make sync-results` — 원격 장비의 LLM 채점 결과 회수
 - `make infer QUERY=<node_id>` — 특정 노드에 대한 top-100 추천 출력
 - `make test` — pytest

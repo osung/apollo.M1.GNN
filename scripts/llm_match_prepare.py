@@ -1,11 +1,19 @@
 """Step 1 of the embedding + LLM matching baseline: candidates and scoring jobs.
 
 For the sampled held-out queries, retrieve top-N opposite-type nodes by
-`norm_embed` (pro-sroberta) similarity and write the LLM scoring jobs.
+node-feature embedding (`embedding` in paths.yaml, e.g. bge-m3) similarity and write the LLM scoring jobs.
+
+Candidate sources ("retrievers"), each giving its own top-N per query:
+  <embedding.name>      node-feature similarity (always), e.g. bge-m3
+  config `retrievers`   saved GNN embeddings, e.g. lightgcn: lightgcn_h128_l2
+  external files        candidates_<direction>_<name>.npz already in output_dir
+                        (e.g. LightFM: scripts/baseline_lightfm.py --save-candidates)
+
+Every (query, candidate) pair in the union is scored by the LLM once.
 
 Outputs (config/llm_match.yaml: output_dir):
-  candidates_<direction>.npz   query_idx (Q,), cand_idx (Q,N), base_score (Q,N)
-  jobs_<direction>.jsonl       one line per prompt (<= llm.batch candidates)
+  candidates_<direction>_<retriever>.npz   query_idx (Q,), cand_idx (Q,N), base_score (Q,N)
+  jobs_<direction>.jsonl                   one line per prompt (<= llm.batch candidates)
 """
 from __future__ import annotations
 
@@ -25,13 +33,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.baselines.llm_match import (
-    GT_DIRECTION,
     build_text_lookup,
+    held_out_queries,
     iter_jobs,
-    select_queries,
+    load_candidates,
+    save_candidates,
     topn_candidates,
+    union_candidates,
 )
-from src.eval.ranking import group_ground_truth
+from src.data.loader import embedding_config
 from src.graph.schema import (
     EDGE_COMMERCIAL,
     EDGE_PERFORMANCE,
@@ -91,17 +101,17 @@ def main() -> None:
                 linked.setdefault(p_i, set()).add(c_i)
     del graph
 
+    embed_name = embedding_config(paths)[2]
     promise_w = float(ccfg["promise_weight"])
     mask_names = bool(cfg["texts"].get("mask_linked_company_names", True))
     need_p: set[int] = set()
     need_c: set[int] = set()
-    selected: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    selected: dict[str, tuple[np.ndarray, list[list[int]]]] = {}
+    z_p_path = Path(paths["processed"]["project_emb"])
+    z_c_path = Path(paths["processed"]["company_emb"])
     for direction in qcfg["directions"]:
-        per_rel = {}
-        for et in REAL_EDGE_TYPES:
-            ei = held_out[(NODE_TYPE_PROJECT, et, NODE_TYPE_COMPANY)].edge_index.numpy()
-            per_rel[et] = list(group_ground_truth(ei, direction=GT_DIRECTION[direction]).keys())
-        query_idx = select_queries(per_rel, max_per_rel, int(qcfg["seed"]))
+        query_idx = held_out_queries(held_out, direction, REAL_EDGE_TYPES, max_per_rel,
+                                     int(qcfg["seed"]))
         q_x, c_x = (project_x, company_x) if direction == "p2c" else (company_x, project_x)
         promise = None
         if promise_w > 0.0:
@@ -112,17 +122,49 @@ def main() -> None:
             promise = (
                 df.set_index(df[id_col].astype(str))["유망성점수"].reindex(ids).to_numpy()
             )
-        log(f"[{direction}] {len(query_idx):,} queries -> top-{topn} candidates")
+        log(f"[{direction}] {len(query_idx):,} queries -> top-{topn} candidates per retriever")
         cand_idx, base = topn_candidates(
             q_x[query_idx], c_x, topn, cand_promise=promise, promise_weight=promise_w,
             device=ccfg["device"], batch_size=int(ccfg["batch_size"]),
         )
-        np.savez_compressed(
-            out_dir / f"candidates_{direction}.npz",
-            query_idx=query_idx, cand_idx=cand_idx, base_score=base,
-        )
-        selected[direction] = (query_idx, cand_idx)
-        q_set, c_set = set(query_idx.tolist()), set(np.unique(cand_idx).tolist())
+        save_candidates(out_dir, direction, embed_name, query_idx, cand_idx, base)
+        for name, tag in (cfg.get("retrievers") or {}).items():
+            zp_file = z_p_path.with_name(f"{z_p_path.stem}_{tag}.npy")
+            zc_file = z_c_path.with_name(f"{z_c_path.stem}_{tag}.npy")
+            if not (zp_file.exists() and zc_file.exists()):
+                log(f"[{direction}] ! no saved embeddings for '{name}' ({zp_file.name}); "
+                    f"skipped - re-run after training to add it")
+                continue
+            z_p = np.load(zp_file)
+            z_c = np.load(zc_file)
+            z_q, z_cand = (z_p, z_c) if direction == "p2c" else (z_c, z_p)
+            cand_idx, base = topn_candidates(
+                z_q[query_idx], z_cand, topn,
+                device=ccfg["device"], batch_size=int(ccfg["batch_size"]),
+            )
+            save_candidates(out_dir, direction, name, query_idx, cand_idx, base)
+            del z_p, z_c
+
+        cands = load_candidates(out_dir, direction)
+        for name, c in list(cands.items()):
+            same = c["query_idx"].shape == query_idx.shape and (c["query_idx"] == query_idx).all()
+            if not same or c["cand_idx"].shape[1] != topn:
+                log(f"[{direction}] ! skipping stale candidates of '{name}' "
+                    f"(different query sample or topn; regenerate it)")
+                del cands[name]
+        rerank_names = cfg.get("llm_rerank") or list(cands)
+        absent = [n for n in rerank_names if n not in cands]
+        if absent:
+            raise SystemExit(f"llm_rerank retrievers without candidates: {absent}")
+        union = union_candidates([cands[n]["cand_idx"] for n in rerank_names],
+                                 int(qcfg["seed"]))
+        n_pairs = sum(len(u) for u in union)
+        log(f"[{direction}] retrievers: {', '.join(cands)}; LLM re-ranks "
+            f"{', '.join(rerank_names)} -> {n_pairs:,} unique pairs "
+            f"({n_pairs / len(union):.0f} per query)")
+        selected[direction] = (query_idx, union)
+        q_set = set(query_idx.tolist())
+        c_set = {c for u in union for c in u}
         (need_p if direction == "p2c" else need_c).update(q_set)
         (need_c if direction == "p2c" else need_p).update(c_set)
         if mask_names and direction == "p2c":

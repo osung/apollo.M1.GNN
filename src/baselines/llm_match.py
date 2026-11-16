@@ -1,4 +1,4 @@
-"""Embedding retrieval + LLM re-ranking baseline (pro-sroberta + LLM matching).
+"""Embedding retrieval + LLM re-ranking baseline (node-feature embedding + LLM matching).
 
 Pipeline, mirroring the APOLLO matching workflow on held-out edges:
 
@@ -55,7 +55,11 @@ def select_queries(
     max_per_relation: int | None,
     seed: int,
 ) -> np.ndarray:
-    """Union of a seeded per-relation sample of query indices, sorted."""
+    """Union of a seeded per-relation sample of query indices, in seeded random order.
+
+    The order is random on purpose: LLM scoring proceeds in this order, so the
+    queries finished at any point of a long run are a random subsample.
+    """
     rng = np.random.default_rng(seed)
     chosen: set[int] = set()
     for rel in sorted(queries_per_relation):
@@ -63,7 +67,55 @@ def select_queries(
         if max_per_relation is not None and len(q) > max_per_relation:
             q = rng.choice(q, size=max_per_relation, replace=False)
         chosen.update(int(x) for x in q)
-    return np.asarray(sorted(chosen), dtype=np.int64)
+    return rng.permutation(np.asarray(sorted(chosen), dtype=np.int64))
+
+
+def held_out_queries(held_out: Any, direction: str, edge_types: Sequence[str],
+                     max_per_relation: int | None, seed: int) -> np.ndarray:
+    """The query sample shared by every retriever (same call => same queries)."""
+    row = 0 if direction == "p2c" else 1
+    per_rel = {
+        et: np.unique(held_out[("project", et, "company")].edge_index[row].numpy()).tolist()
+        for et in edge_types
+    }
+    return select_queries(per_rel, max_per_relation, seed)
+
+
+def candidate_path(out_dir: str | Path, direction: str, retriever: str) -> Path:
+    return Path(out_dir) / f"candidates_{direction}_{retriever}.npz"
+
+
+def save_candidates(out_dir: str | Path, direction: str, retriever: str,
+                    query_idx: np.ndarray, cand_idx: np.ndarray, base_score: np.ndarray) -> Path:
+    path = candidate_path(out_dir, direction, retriever)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, query_idx=query_idx, cand_idx=cand_idx, base_score=base_score)
+    return path
+
+
+def load_candidates(out_dir: str | Path, direction: str) -> dict[str, dict[str, np.ndarray]]:
+    """All retrievers' candidate files for a direction -> {retriever: arrays}."""
+    out = {}
+    prefix = f"candidates_{direction}_"
+    for path in sorted(Path(out_dir).glob(f"{prefix}*.npz")):
+        with np.load(path) as z:
+            out[path.stem[len(prefix):]] = {k: z[k] for k in z.files}
+    return out
+
+
+def union_candidates(cand_lists: Sequence[np.ndarray], seed: int) -> list[list[int]]:
+    """Per query, the de-duplicated union of every retriever's candidates, shuffled.
+
+    Each (query, candidate) pair is scored by the LLM once and the score is
+    shared by all retrievers that proposed it. Shuffling keeps one prompt from
+    holding only one retriever's (or only top-ranked) candidates.
+    """
+    rng = np.random.default_rng(seed)
+    out = []
+    for rows in zip(*cand_lists, strict=True):
+        u = np.unique(np.concatenate(rows))
+        out.append(rng.permutation(u).tolist())
+    return out
 
 
 def topn_candidates(
@@ -134,7 +186,7 @@ def build_text_lookup(
 def iter_jobs(
     direction: str,
     query_idx: np.ndarray,
-    cand_idx: np.ndarray,
+    cand_idx: Sequence[Sequence[int]],
     project_ids: Sequence[str],
     company_ids: Sequence[str],
     project_text: Mapping[str, Mapping[str, Any]],
@@ -158,7 +210,8 @@ def iter_jobs(
         return company_doc_text(company_text.get(cid, {}))
 
     src_kind, cand_kind = ("project", "company") if direction == "p2c" else ("company", "project")
-    for rank, (q, row) in enumerate(zip(query_idx.tolist(), cand_idx.tolist(), strict=True)):
+    for rank, (q, row) in enumerate(zip(query_idx.tolist(), cand_idx, strict=True)):
+        row = [int(c) for c in row]
         src_text = doc(src_kind, q)
         names = (mask or {}).get(q, ())
         if names and direction == "p2c":

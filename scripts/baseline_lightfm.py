@@ -25,6 +25,7 @@ from src.graph.schema import (
     EDGE_ROYALTY,
     NODE_TYPE_COMPANY,
     NODE_TYPE_PROJECT,
+    OBSERVED_EDGE_TYPES,
 )
 from src.utils import load_yaml
 
@@ -61,6 +62,12 @@ def main() -> None:
              "'project' (default) = LightFM's native p2c optimization. "
              "'company' swaps roles so WARP directly optimizes c2p retrieval.",
     )
+    parser.add_argument(
+        "--save-candidates", action="store_true",
+        help="also write this model's top-N candidates for the LLM matching query "
+             "sample (candidates_<direction>_lightfm.npz, see config/llm_match.yaml)",
+    )
+    parser.add_argument("--llm-config", default="config/llm_match.yaml")
     args = parser.parse_args()
 
     paths = load_yaml(args.paths)
@@ -75,10 +82,16 @@ def main() -> None:
 
     project_x = graph[NODE_TYPE_PROJECT].x.numpy()
     company_x = graph[NODE_TYPE_COMPANY].x.numpy()
-    train_edges = _collect_edges(graph, REAL_EDGE_TYPES)
+    train_types = tuple(
+        et for et in OBSERVED_EDGE_TYPES
+        if (NODE_TYPE_PROJECT, et, NODE_TYPE_COMPANY) in graph.edge_types
+    )
+    train_edges = _collect_edges(graph, train_types)
     relation_weights = {
-        et: float(graph_cfg["edge_types"][et]["weight"]) for et in REAL_EDGE_TYPES
+        et: float(graph_cfg["edge_types"][et]["weight"]) for et in train_types
     }
+    print("[lightfm] training relations: "
+          + ", ".join(f"{et}={e.shape[1]:,}" for et, e in train_edges.items()))
 
     # When training from the company perspective, swap the user/item roles so
     # LightFM's WARP loss (which optimizes rank of positive items given a user)
@@ -155,6 +168,19 @@ def main() -> None:
         print(f"[lightfm] evaluating {et}: {len(query_ids)} queries")
         preds, _ = recommend(np.asarray(query_ids, dtype=np.int64), topk=args.topk)
         per_relation_metrics[et] = evaluate(preds, query_ids, gt, ks=(10, args.topk))
+
+    if args.save_candidates:
+        from src.baselines.llm_match import held_out_queries, save_candidates
+
+        llm_cfg = load_yaml(args.llm_config)
+        q = held_out_queries(held_out, args.direction, REAL_EDGE_TYPES,
+                             llm_cfg["queries"]["max_per_relation"],
+                             int(llm_cfg["queries"]["seed"]))
+        cand_idx, cand_score = recommend(q, topk=int(llm_cfg["candidates"]["topn"]))
+        path = save_candidates(llm_cfg["output_dir"], args.direction, "lightfm",
+                               q, cand_idx, cand_score)
+        print(f"[lightfm] saved top-{cand_idx.shape[1]} candidates for {len(q):,} "
+              f"LLM-matching queries -> {path}")
 
     print(f"\n=== LightFM [{args.direction}] ===")
     for et, m in per_relation_metrics.items():

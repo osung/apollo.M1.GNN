@@ -1,10 +1,10 @@
-# pro-sroberta 임베딩 후보 검색 + LLM 적합도 채점(재랭킹) 비교 실험.
+# 임베딩(config/paths.yaml 의 embedding, 현재 bge-m3) 후보 검색 + LLM 적합도 채점(재랭킹) 비교 실험.
 # ~/work/apollo 의 과제↔기업 매칭 파이프라인과 동일한 채점 규격을 held-out 간선 평가에 적용한다.
 
 # 문서 텍스트 원천. 설명문(with_desc)에 없는 노드는 raw 테이블의 이름·키워드만으로 문서를 만든다.
 texts:
-  project_desc: data/source/public_RnD_embeddings_pro_with_desc_260708.pkl
-  company_desc: data/source/company_embeddings_pro_260514_with_desc_ksic.pkl
+  project_desc: data/source/bge_m3_noname/out/public_RnD_embeddings_bge_m3_260324.pkl
+  company_desc: data/source/bge_m3_noname/out/company_embeddings_bge_m3_0925_260324.pkl
   # 과제 설명문에는 수행기관명이 그대로 적혀 있다("(주)A에서 수행하는 이 과제는 …").
   # 그대로 두면 LLM 이 업체명 일치만으로 정답(특히 수행 관계)을 맞히므로, 해당 과제와
   # 간선으로 연결된 기업의 이름을 과제 문서에서 ○○○ 로 가린다.
@@ -12,15 +12,28 @@ texts:
 
 output_dir: data/processed/llm_match
 
+# 후보 검색 모델(retriever). 노드 피처 임베딩(bge-m3) 유사도는 항상 포함된다.
+# 여기에는 저장된 GNN 임베딩을 "표시 이름: 실험 태그" 로 적는다
+# (data/processed/project_z_<태그>.npy / company_z_<태그>.npy).
+# LightFM 처럼 임베딩 파일이 없는 모델은 스스로 후보 파일을 쓴다:
+#   python scripts/baseline_lightfm.py --save-candidates
+retrievers:
+  lightgcn: lightgcn_h128_l2_hr40_c2p100_sim10_nonorm_wn67_mbe
+  hgt: hgt_h128_l2_nh4_hr40_c2p100_sim10_nonorm_wn67_mbe
+
+# LLM 으로 재랭킹할 검색 모델. 여기 적힌 모델의 후보만 LLM 이 채점한다(여러 개면 합집합).
+# 나머지 모델은 같은 쿼리에서 단독 순위만 보고된다. 비우면(null) 모든 모델을 재랭킹한다.
+llm_rerank: [bge-m3]
+
 queries:
-  directions: [p2c]            # p2c | c2p (둘 다 가능)
-  max_per_relation: 500        # 관계별 held-out 쿼리 표본 수. null 이면 전체
+  directions: [c2p]            # 평가 방향. c2p = 기업 → 과제 (기본), p2c = 과제 → 기업. 둘 다 적을 수 있다
+  max_per_relation: 200      # 관계별 held-out 쿼리 표본 수. null 이면 전체
   seed: 42
 
 candidates:
-  topn: 100                    # LLM 이 채점할 임베딩 상위 후보 수 (>= eval k 의 최댓값)
+  topn: 100                    # 검색 모델별로 LLM 이 채점할 상위 후보 수 (>= eval k 의 최댓값)
   # 후보 점수 = (1 - promise_weight) * cos + promise_weight * 유망성점수/100
-  # 0.0 = 순수 pro-sroberta 코사인. apollo 납품 파이프라인은 0.4 를 쓴다.
+  # 0.0 = 순수 임베딩 코사인. apollo 납품 파이프라인은 0.4 를 쓴다.
   promise_weight: 0.0
   device: cpu
   batch_size: 512

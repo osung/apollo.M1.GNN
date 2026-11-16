@@ -6,11 +6,14 @@ from scripts.llm_match_score import MockEngine, score_chunk
 from src.baselines.llm_match import (
     core_name,
     iter_jobs,
+    load_candidates,
     load_scores,
     mask_names,
     rerank,
+    save_candidates,
     select_queries,
     topn_candidates,
+    union_candidates,
 )
 from src.baselines.llm_prompt import (
     build_score_messages,
@@ -61,6 +64,7 @@ def test_select_queries_sampled_and_deterministic():
     q1 = select_queries(per_rel, 10, seed=0)
     q2 = select_queries(per_rel, 10, seed=0)
     assert q1.tolist() == q2.tolist()
+    assert q1.tolist() != sorted(q1.tolist())  # random order, not sorted
     assert {1, 2, 3} <= set(q1.tolist())
     assert len(q1) <= 13
     assert len(select_queries(per_rel, None, seed=0)) == 100
@@ -131,3 +135,22 @@ def test_iter_jobs_masks_by_direction():
     (job,) = iter_jobs("c2p", q, cands, ["p0"], ["c0"], p_text, c_text, 20, mask={0: ["(주)가나전자"]})
     assert job["src_text"] == "업체명: (주)가나전자"
     assert job["cand_texts"] == ["과제명: ○○○ 공동개발"]
+
+
+def test_union_candidates_dedups_per_query():
+    a = np.array([[1, 2, 3], [7, 8, 9]])
+    b = np.array([[3, 4, 1], [9, 10, 11]])
+    u = union_candidates([a, b], seed=0)
+    assert sorted(u[0]) == [1, 2, 3, 4]
+    assert sorted(u[1]) == [7, 8, 9, 10, 11]
+    assert u == union_candidates([a, b], seed=0)
+
+
+def test_candidates_roundtrip_by_retriever(tmp_path):
+    q = np.array([3, 1])
+    save_candidates(tmp_path, "p2c", "lightfm", q, np.array([[1, 2], [3, 4]]), np.ones((2, 2)))
+    save_candidates(tmp_path, "p2c", "bge-m3", q, np.array([[5, 6], [7, 8]]), np.ones((2, 2)))
+    save_candidates(tmp_path, "c2p", "hgt", q, np.array([[0, 0], [0, 0]]), np.ones((2, 2)))
+    got = load_candidates(tmp_path, "p2c")
+    assert sorted(got) == ["bge-m3", "lightfm"]
+    assert got["lightfm"]["cand_idx"].tolist() == [[1, 2], [3, 4]]

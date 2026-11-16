@@ -14,7 +14,7 @@ setup:
 
 # Push the working tree (code only) to the remote machine.
 sync-code:
-	rsync -a --exclude /.venv --exclude /.venv-bootstrap --exclude /data --exclude /outputs \
+	rsync -a --exclude /.venv --exclude /.venv-bootstrap --exclude /data --exclude /outputs --exclude /logs \
 		--exclude __pycache__ --exclude .pytest_cache --exclude .ruff_cache --exclude .mypy_cache \
 		./ $(REMOTE):$(REMOTE_DIR)/
 
@@ -68,11 +68,10 @@ baseline-cf:
 baseline-lightfm:
 	$(PY) scripts/baseline_lightfm.py
 
-# --- pro-sroberta 임베딩 + LLM 매칭 비교 (config/llm_match.yaml) ---
-DIRECTION ?= p2c
+# --- 임베딩(bge-m3) · GNN · LightFM + LLM 매칭 비교 (config/llm_match.yaml) ---
+DIRECTION ?= c2p
 SHARD ?= 0
 NUM_SHARDS ?= 1
-Z_TAGS ?=
 
 llm-prepare:
 	$(PY) scripts/llm_match_prepare.py
@@ -84,7 +83,7 @@ llm-score:
 		--shard-id $(SHARD) --num-shards $(NUM_SHARDS)
 
 llm-eval:
-	$(PY) scripts/llm_match_eval.py --direction $(DIRECTION) $(foreach t,$(Z_TAGS),--z-tag $(t))
+	$(PY) scripts/llm_match_eval.py --direction $(DIRECTION)
 
 # 원격 장비의 LLM 채점 결과(scores_*.jsonl)를 가져온다.
 sync-results:

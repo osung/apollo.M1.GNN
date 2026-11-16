@@ -32,3 +32,4 @@ results/
 
 # local copies of trained model checkpoints (synced from Drive)
 outputs/
+logs/
