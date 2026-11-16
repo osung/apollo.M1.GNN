@@ -24,7 +24,7 @@
   - `models/` — GNN 인코더, projection MLP 정의
   - `training/` — 학습 루프, 손실 함수, 샘플러
   - `serving/` — FAISS 인덱스 빌드 및 top-k 검색
-  - `eval/` — Recall@K, NDCG@K 등 평가 지표
+  - `eval/` — Hits@K, NDCG@K, Recall@K 평가 지표
 - `data/raw/` — 제공받은 원본 pickle 파일 (git-ignored)
 - `data/processed/` — 전처리된 그래프 객체, 임베딩 캐시
 - `config/` — YAML 설정 (경로, 하이퍼파라미터, 가중치)
@@ -84,11 +84,16 @@
 - 과제 쿼리 → 기업 인덱스 검색, 기업 쿼리 → 과제 인덱스 검색
 
 ## Commands
+- `make setup` — `.venv` 생성(uv, Python 3.11, torch cu130, LightFM 소스 빌드) 및 `data/{raw,raw_merged,processed}` 를 `~/data/apollo.data` 로 심볼릭 링크
+- `make sync-code` / `make sync-data` — 원격 실험 장비(`REMOTE`, 기본 `192.168.100.2` = promaxgb10-60d4 직결 링크)로 코드 / 데이터 rsync
+- `make merge-projects` — 다년도 과제 병합본을 `data/raw_merged/` 에 생성 (`config/paths.yaml` 기본 입력)
 - `make data` — 원본 pickle 로드, 그래프 객체 생성 (`data/processed/graph.pt`)
 - `make train` — GNN 인코더 학습
 - `make train-coldstart` — projection MLP 학습 (GNN 학습 완료 후 실행)
 - `make index` — 학습된 임베딩으로 FAISS 인덱스 빌드
-- `make eval` — held-out 간선에 대한 Recall@100 / NDCG@100
+- `make eval` — held-out 간선에 대한 Hits / NDCG / Recall (@10, @100)
+- `make llm-prepare` / `make llm-score` / `make llm-eval` — pro-sroberta 임베딩 + LLM 매칭 비교 실험 (`config/llm_match.yaml`, 상세는 docs/evaluation.md)
+- `make sync-results` — 원격 장비의 LLM 채점 결과 회수
 - `make infer QUERY=<node_id>` — 특정 노드에 대한 top-100 추천 출력
 - `make test` — pytest
 - `make lint` — ruff + mypy

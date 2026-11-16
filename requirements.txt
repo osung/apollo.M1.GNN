@@ -1,10 +1,15 @@
 numpy
 pandas
+scipy
 pyyaml
 torch>=2.0
 torch-geometric>=2.5
 faiss-cpu
 tqdm
+matplotlib
+networkx
+openpyxl
+pyarrow
 
 # dev
 pytest

@@ -2,12 +2,15 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv-bootstrap/
 .env
 
 # data
-data/raw/
-data/raw_merged*/
-data/processed/
+# (no trailing slash: these are symlinks into ~/data/apollo.data)
+data/raw
+data/raw_merged*
+data/processed
+data/source
 
 # model / index artifacts
 *.pt
