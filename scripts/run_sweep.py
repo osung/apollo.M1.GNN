@@ -59,7 +59,10 @@ DIRECTIONS = (
     ("c2p_only", 0.0, 1.0),
     ("both",     1.0, 1.0),
 )
-METRIC_FIELDS = ("recall@10", "ndcg@10", "recall@100", "ndcg@100")
+METRIC_FIELDS = (
+    "hits@10", "ndcg@10", "recall@10",
+    "hits@100", "ndcg@100", "recall@100",
+)
 
 
 def build_command(

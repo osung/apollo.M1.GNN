@@ -52,6 +52,22 @@ def recall_at_k(topk_preds: np.ndarray, gt: dict[int, set[int]], query_ids: Iter
     return hits / total if total else float("nan")
 
 
+def hits_at_k(topk_preds: np.ndarray, gt: dict[int, set[int]], query_ids: Iterable[int]) -> float:
+    """Mean Hits@K (hit rate): share of queries with at least one relevant item in the top-K.
+
+    Unlike Recall@K it does not depend on how many relevant items a query has,
+    so the two coincide only when every query has exactly one ground-truth item.
+    """
+    hits, total = 0, 0
+    for row, qi in zip(topk_preds, query_ids):
+        rel = gt.get(int(qi))
+        if not rel:
+            continue
+        hits += any(int(x) in rel for x in row.tolist())
+        total += 1
+    return hits / total if total else float("nan")
+
+
 def ndcg_at_k(topk_preds: np.ndarray, gt: dict[int, set[int]], query_ids: Iterable[int]) -> float:
     """Binary-relevance NDCG@K averaged over queries with at least one ground-truth."""
     scores, total = 0.0, 0
@@ -76,13 +92,14 @@ def ndcg_at_k(topk_preds: np.ndarray, gt: dict[int, set[int]], query_ids: Iterab
 def evaluate(
     topk_preds: np.ndarray, query_ids: Iterable[int], gt: dict[int, set[int]], ks=(10, 100)
 ) -> dict[str, float]:
-    """Convenience: compute Recall@k and NDCG@k for several cutoffs."""
+    """Convenience: compute Hits@k, NDCG@k and Recall@k for several cutoffs."""
     query_ids = list(query_ids)
     max_k = max(ks)
     if topk_preds.shape[1] < max_k:
         raise ValueError(f"preds have only {topk_preds.shape[1]} columns, need {max_k}")
     out: dict[str, float] = {}
     for k in ks:
-        out[f"recall@{k}"] = recall_at_k(topk_preds[:, :k], gt, query_ids)
+        out[f"hits@{k}"] = hits_at_k(topk_preds[:, :k], gt, query_ids)
         out[f"ndcg@{k}"] = ndcg_at_k(topk_preds[:, :k], gt, query_ids)
+        out[f"recall@{k}"] = recall_at_k(topk_preds[:, :k], gt, query_ids)
     return out

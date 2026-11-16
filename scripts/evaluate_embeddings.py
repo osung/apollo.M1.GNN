@@ -83,8 +83,9 @@ def _print_row(tag: str, metrics: dict, topk: int):
         if not m:
             continue
         print(f"  {tag}  {et:11s}  "
-              f"R@10={m['recall@10']:.4f}  N@10={m['ndcg@10']:.4f}  "
-              f"R@{topk}={m[f'recall@{topk}']:.4f}  N@{topk}={m[f'ndcg@{topk}']:.4f}")
+              f"H@10={m['hits@10']:.4f}  N@10={m['ndcg@10']:.4f}  R@10={m['recall@10']:.4f}  "
+              f"H@{topk}={m[f'hits@{topk}']:.4f}  N@{topk}={m[f'ndcg@{topk}']:.4f}  "
+              f"R@{topk}={m[f'recall@{topk}']:.4f}")
 
 
 def _load_z(path: Path) -> np.ndarray:

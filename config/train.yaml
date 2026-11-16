@@ -18,7 +18,7 @@ projection_mlp:
 
 eval:
   k: 100
-  metrics: [recall, ndcg]
+  metrics: [hits, ndcg, recall]   # 각각 @10, @100 으로 보고
 
 serving:
   topk: 100

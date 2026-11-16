@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from src.eval.ranking import evaluate, group_ground_truth, ndcg_at_k, recall_at_k
+from src.eval.ranking import evaluate, group_ground_truth, hits_at_k, ndcg_at_k, recall_at_k
 
 
 def test_group_ground_truth_p2c():
@@ -45,6 +45,19 @@ def test_recall_skips_queries_with_no_gt():
     assert recall_at_k(preds, gt, [0, 1]) == 1.0
 
 
+def test_hits_is_binary_per_query():
+    # query 0: one of two relevant items retrieved -> hit; query 1: none -> miss
+    preds = np.array([[10, 99], [7, 8]])
+    gt = {0: {10, 11}, 1: {5}}
+    assert hits_at_k(preds, gt, [0, 1]) == 0.5
+    assert recall_at_k(preds, gt, [0, 1]) == 0.25
+
+
+def test_hits_skips_queries_with_no_gt():
+    preds = np.array([[10, 99], [7, 8]])
+    assert hits_at_k(preds, {0: {10}}, [0, 1]) == 1.0
+
+
 def test_ndcg_ideal_ordering():
     preds = np.array([[10, 99, 88]])
     gt = {0: {10}}
@@ -61,6 +74,8 @@ def test_evaluate_bundle():
     preds = np.array([[10, 99, 88, 77]])
     gt = {0: {10, 77}}
     m = evaluate(preds, [0], gt, ks=(1, 4))
+    assert set(m) == {"hits@1", "ndcg@1", "recall@1", "hits@4", "ndcg@4", "recall@4"}
+    assert m["hits@1"] == 1.0
     assert m["recall@1"] == 0.5
     assert m["recall@4"] == 1.0
     assert 0 < m["ndcg@4"] <= 1.0
