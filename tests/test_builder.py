@@ -186,3 +186,79 @@ def test_builder_summarize_runs(synthetic_data):
     text = summarize(result)
     assert "nodes:" in text
     assert "edges (train):" in text
+
+
+def test_load_nodes_uses_configured_embedding_and_drops_missing(tmp_path):
+    import pytest
+
+    from src.data.loader import load_nodes
+
+    df = pd.DataFrame({
+        "id": ["a", "b", "c", "d"],
+        "norm_embed": [np.ones(3, dtype=np.float32)] * 4,
+        "bge": [np.full(5, 0.5, dtype=np.float16), None, np.zeros(5, dtype=np.float32),
+                np.full(5, 0.25, dtype=np.float32)],
+    })
+    path = tmp_path / "nodes.pkl"
+    df.to_pickle(path)
+
+    out = load_nodes(path, "id", embed_col="bge", drop_missing=True)
+    assert out["id"].tolist() == ["a", "d"]          # missing and all-zero vectors dropped
+    assert "bge" not in out.columns
+    assert out["norm_embed"].iloc[0].shape == (5,)
+    assert out["norm_embed"].iloc[0].dtype == np.float32
+    with pytest.raises(ValueError):
+        load_nodes(path, "id", embed_col="bge", drop_missing=False)
+    assert len(load_nodes(path, "id")) == 4          # default: original norm_embed, nothing dropped
+
+
+def test_held_out_pairs_absent_from_every_training_relation(synthetic_data):
+    """A pair held out in one relation must not survive as a train edge of another."""
+    path_cfg, graph_cfg, _ = synthetic_data
+    result = build_graph(path_cfg, graph_cfg)
+    n_c = result.graph[NODE_TYPE_COMPANY].num_nodes
+    held: set[int] = set()
+    train: set[int] = set()
+    for et in (EDGE_ROYALTY, EDGE_COMMERCIAL, EDGE_PERFORMANCE):
+        rel = (NODE_TYPE_PROJECT, et, NODE_TYPE_COMPANY)
+        ho = result.held_out[rel].edge_index.numpy()
+        tr = result.graph[rel].edge_index.numpy()
+        held.update((ho[0] * n_c + ho[1]).tolist())
+        train.update((tr[0] * n_c + tr[1]).tolist())
+    assert held and not (held & train)
+
+
+def test_patent_relation_is_trained_on_but_never_held_out(synthetic_data, tmp_path):
+    """Patent pairs join the training graph; pairs equal to a held-out pair are dropped
+    and the held-out set itself is unchanged by adding the relation."""
+    path_cfg, graph_cfg, _ = synthetic_data
+    base = build_graph(path_cfg, graph_cfg)
+    held = set()
+    for et in (EDGE_ROYALTY, EDGE_COMMERCIAL, EDGE_PERFORMANCE):
+        ei = base.held_out[(NODE_TYPE_PROJECT, et, NODE_TYPE_COMPANY)].edge_index.numpy()
+        held.update(zip(ei[0].tolist(), ei[1].tolist()))
+    p_ids, c_ids = base.project_map.idx_to_id, base.company_map.idx_to_id
+    leaked = sorted(held)[:3]                       # patent rows that repeat held-out pairs
+    fresh = [(0, 1), (2, 3), (4, 5)]
+    rows = [{"과제고유번호": p_ids[p], "사업자번호": c_ids[c]} for p, c in leaked + fresh]
+    patent_path = tmp_path / "patent.pkl"
+    pd.DataFrame(rows).to_pickle(patent_path)
+
+    path_cfg = {**path_cfg, "raw": {**path_cfg["raw"], "edges_patent": str(patent_path)},
+                "edge_columns": {**path_cfg["edge_columns"],
+                                 "patent": {"project": "과제고유번호", "company": "사업자번호"}}}
+    graph_cfg = {**graph_cfg, "edge_types": {**graph_cfg["edge_types"],
+                                             "patent": {"priority": 3, "weight": 0.5}}}
+    result = build_graph(path_cfg, graph_cfg)
+
+    rel = (NODE_TYPE_PROJECT, "patent", NODE_TYPE_COMPANY)
+    pat = result.graph[rel].edge_index.numpy()
+    pat_pairs = set(zip(pat[0].tolist(), pat[1].tolist()))
+    assert not (pat_pairs & held)                               # no held-out pair leaks in
+    assert pat_pairs == set(fresh) - held
+    assert float(result.graph[rel].edge_weight[0]) == 0.5
+    assert (NODE_TYPE_COMPANY, "rev_patent", NODE_TYPE_PROJECT) in result.graph.edge_types
+    assert rel not in result.held_out.edge_types                # never evaluated
+    for et in (EDGE_ROYALTY, EDGE_COMMERCIAL, EDGE_PERFORMANCE):  # same held-out set as before
+        r = (NODE_TYPE_PROJECT, et, NODE_TYPE_COMPANY)
+        assert (result.held_out[r].edge_index == base.held_out[r].edge_index).all()

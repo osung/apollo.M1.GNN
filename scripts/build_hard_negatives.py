@@ -319,9 +319,10 @@ def main():
             else:  # c2p: key by company, values are projects
                 positive_map[int(c)].add(int(p))
 
-    for et in REAL_RELATIONS:
+    for et in (*REAL_RELATIONS, "patent"):
         rel = (NODE_TYPE_PROJECT, et, NODE_TYPE_COMPANY)
-        _add_positives(graph[rel].edge_index.numpy())
+        if rel in graph.edge_types:
+            _add_positives(graph[rel].edge_index.numpy())
     held_out_path = Path(graph_path).with_name("held_out.pt")
     if held_out_path.exists():
         ho = torch.load(held_out_path, weights_only=False)

@@ -8,9 +8,21 @@ edge_types:
   performance:
     priority: 3
     weight: 0.5
+  # 특허: 과제의 성과 특허를 출원한 기업. 관측된 관계이며 수행과 같은 가중치.
+  # 학습(양성·메시지 전파)에만 쓰고 held-out 으로 분리하지 않는다 (평가는 위 3종).
+  patent:
+    priority: 3
+    weight: 0.5
   similarity:
     priority: 4
     weight: 0.25
+  # 파생 간선 (메시지 전파 전용, 양성으로 쓰지 않음). 유사도보다 약한 가중치.
+  keyword:
+    priority: 5
+    weight: 0.2
+  inherited:
+    priority: 5
+    weight: 0.2
 
 # (1) 양방향 메시지 패싱을 위해 reverse edge 추가
 reverse_edges:
@@ -26,6 +38,9 @@ held_out:
   seed: 42
   per_edge_type: true
   apply_to: [royalty, commercial, performance]  # similarity는 평가 대상 아님
+  # 같은 (과제, 기업) 쌍이 여러 관계에 동시에 나타난다. 한 관계에서 held-out 된 쌍은
+  # 다른 관계의 학습 간선에서도 제거한다 (끄면 held-out 쌍의 약 40~50% 가 학습 그래프에 남는다).
+  exclude_pairs_from_all_relations: true
 
 # (3) 유사도 간선 — 아래 "Recommendation" 참고
 similarity_edges:
@@ -41,3 +56,22 @@ duplicate_policy: heterogeneous
 
 bipartite:
   strict: true
+
+# 파생 과제-기업 간선 (scripts/build_aux_edges.py 가 캐시를 만들고, 학습 때 --with-aux 로 붙인다).
+# 모두 과제-기업 간선이므로 이분 그래프 불변식을 지킨다.
+auxiliary_edges:
+  # held-out 쌍과 같은 파생/유사도 간선은 메시지 전파에서 제외한다.
+  # (평가 대상 쌍이 직접 이웃으로 주어지지 않게 한다. 학습 쌍과 같은 취급)
+  drop_held_out_pairs: true
+  keyword:                     # 과제 키워드와 기업 키워드의 자카드 유사도
+    cache_path: data/processed/aux_edges_keyword.npz
+    topk: 5                    # 과제마다 상위 5 기업 + 기업마다 상위 5 과제 (합집합)
+    min_shared: 2              # 공통 키워드 최소 개수
+    min_jaccard: 0.0
+    max_keyword_df: 2000       # 이보다 많은 과제/기업에 나오는 흔한 키워드는 제외
+  inherited:                   # 비슷한 같은 타입 노드의 연결 상대를 물려받음
+    cache_path: data/processed/aux_edges_inherited.npz
+    k_neighbors: 5             # 과제는 비슷한 과제 5개, 기업은 비슷한 기업 5곳 (학습 간선이 있는 노드 중에서)
+    top_m: 5                   # 노드마다 물려받는 상대 수
+    min_similarity: 0.0        # 이웃으로 인정할 최소 bge-m3 코사인 유사도
+

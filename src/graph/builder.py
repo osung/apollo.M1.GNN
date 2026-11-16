@@ -8,9 +8,10 @@ import pandas as pd
 import torch
 from torch_geometric.data import HeteroData
 
-from src.data.loader import load_edges, load_nodes, stack_embeddings
+from src.data.loader import embedding_config, load_edges, load_nodes, stack_embeddings
 from src.graph.schema import (
     EDGE_COMMERCIAL,
+    EDGE_PATENT,
     EDGE_PERFORMANCE,
     EDGE_ROYALTY,
     NODE_TYPE_COMPANY,
@@ -92,8 +93,9 @@ def build_graph(paths: dict, graph_cfg: dict) -> BuildResult:
     id_cols = paths["id_columns"]
     edge_cols = paths["edge_columns"]
 
-    project_df = load_nodes(paths["raw"]["projects"], id_cols["project"])
-    company_df = load_nodes(paths["raw"]["companies"], id_cols["company"])
+    embed_col, drop_missing, _ = embedding_config(paths)
+    project_df = load_nodes(paths["raw"]["projects"], id_cols["project"], embed_col, drop_missing)
+    company_df = load_nodes(paths["raw"]["companies"], id_cols["company"], embed_col, drop_missing)
 
     project_map = NodeMap.from_ids(project_df[id_cols["project"]].tolist())
     company_map = NodeMap.from_ids(company_df[id_cols["company"]].tolist())
@@ -106,10 +108,14 @@ def build_graph(paths: dict, graph_cfg: dict) -> BuildResult:
         EDGE_COMMERCIAL: paths["raw"]["edges_commercial"],
         EDGE_PERFORMANCE: paths["raw"]["edges_performance"],
     }
+    # Optional observed relation that is trained on but never held out.
+    if paths["raw"].get("edges_patent"):
+        edge_files[EDGE_PATENT] = paths["raw"]["edges_patent"]
+    relations = tuple(edge_files)
 
     all_edges: dict[str, np.ndarray] = {}
     drop_counts: dict[str, int] = {}
-    for et in REAL_EDGE_TYPES:
+    for et in relations:
         df = load_edges(
             edge_files[et],
             project_col=edge_cols[et]["project"],
@@ -136,6 +142,22 @@ def build_graph(paths: dict, graph_cfg: dict) -> BuildResult:
         train_edges[et] = tr
         held_edges[et] = ho
 
+    # Leakage guard (rule #6): the same (project, company) pair often appears under
+    # several relations. A pair held out in one relation must not stay in the training
+    # graph as an edge of another relation, or graph models can simply memorize it.
+    n_leak_removed: dict[str, int] = {}
+    if do_split and bool(held_cfg.get("exclude_pairs_from_all_relations", True)):
+        n_company = len(company_map.idx_to_id)
+        held_keys = np.unique(np.concatenate(
+            [ho[0] * n_company + ho[1] for ho in held_edges.values()]
+        ))
+        for et, tr in train_edges.items():
+            keep = ~np.isin(tr[0] * n_company + tr[1], held_keys)
+            n_leak_removed[et] = int((~keep).sum())
+            train_edges[et] = tr[:, keep]
+    drop_counts.update({f"{et}_train_removed_as_held_out_pair": n
+                        for et, n in n_leak_removed.items()})
+
     add_reverse = bool(graph_cfg.get("reverse_edges", {}).get("enabled", True))
     weights_as_attr = bool(graph_cfg.get("edge_weights_as_attr", True))
 
@@ -145,7 +167,7 @@ def build_graph(paths: dict, graph_cfg: dict) -> BuildResult:
     graph[NODE_TYPE_PROJECT].num_nodes = project_x.shape[0]
     graph[NODE_TYPE_COMPANY].num_nodes = company_x.shape[0]
 
-    for et in REAL_EDGE_TYPES:
+    for et in relations:
         weight = float(graph_cfg["edge_types"][et]["weight"])
         _add_relation(
             graph,
@@ -210,8 +232,10 @@ def summarize(result: BuildResult) -> str:
         f"company.x: {tuple(g[NODE_TYPE_COMPANY].x.shape)} {g[NODE_TYPE_COMPANY].x.dtype}",
         "edges (train):",
     ]
-    for et in REAL_EDGE_TYPES:
+    for et in (*REAL_EDGE_TYPES, EDGE_PATENT):
         rel = (NODE_TYPE_PROJECT, et, NODE_TYPE_COMPANY)
+        if rel not in g.edge_types:
+            continue
         ei = g[rel].edge_index
         lines.append(f"  {et:12s}  E={ei.shape[1]:>10,}")
     lines.append("edges (held_out):")
