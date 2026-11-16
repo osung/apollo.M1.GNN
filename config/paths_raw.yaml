@@ -1,9 +1,16 @@
 raw:
-  projects: data/raw/public_RnD_embeddings_pro_260324.pkl
-  companies: data/raw/company_embeddings_pro_0925_260324.pkl
+  projects: data/source/bge_m3_noname/out/public_RnD_embeddings_bge_m3_260324.pkl
+  companies: data/source/bge_m3_noname/out/company_embeddings_bge_m3_0925_260324.pkl
   edges_royalty: data/raw/df_pr_royalty_260417_valid_biz.pkl
   edges_commercial: data/raw/df_pr_commercial_260417_valid_biz.pkl
   edges_performance: data/raw/df_project_bizno_valid.pkl
+
+# 노드 피처로 쓸 임베딩. 그래프 안에서는 항상 `norm_embed` 라는 이름으로 다룬다.
+embedding:
+  name: bge-m3                 # 표시 이름 (LLM 매칭 비교의 임베딩 검색 모델 이름)
+  column: bge_m3_embed         # 노드 pickle 의 벡터 컬럼 (pro-sroberta: norm_embed)
+  # 벡터는 기업명을 제거한 설명문으로 만든 것이다 (bge_m3_noname, scripts/build_noname_embed_input.py)
+  drop_missing: true           # 벡터가 없는 과제·기업은 그래프(학습·평가)에서 제외
 
 processed:
   graph: data/processed/graph.pt
@@ -21,3 +28,19 @@ edge_columns:
   royalty: { project: 과제고유번호, company: 기술실시대상기관_사업자번호 }
   commercial: { project: 과제고유번호, company: 사업화주체_사업자등록번호 }
   performance: { project: 과제고유번호, company: 사업자번호 }
+
+# 기업명을 제거한 설명문으로 bge-m3 벡터를 다시 만들 때의 입출력 (scripts/build_noname_embed_input.py)
+noname_embedding:
+  source_input: data/source/bge_m3/embed_input.pkl      # [kind, id, text, src] 원문 설명문
+  work_dir: data/source/bge_m3_noname                   # 이름 제거본 embed_input 과 임베딩 결과
+  company_names: data/raw/company_embeddings_pro_0925_260324.pkl
+  num_shards: 1
+
+# 특허 간선 원천 (scripts/build_patent_edges.py)
+patent_edges:
+  source: data/source/nice_patent_260813.pkl            # 과제번호(list), 출원기관사업자번호(';' 구분)
+  project_column: 과제번호
+  applicant_column: 출원기관사업자번호
+  # 다년도 병합의 대표 ID 를 구할 과제 테이블 (과제고유번호, 과제명 만 사용)
+  project_names: data/raw/public_RnD_embeddings_pro_260324.pkl
+  output: data/raw_merged/df_patent_edges.pkl

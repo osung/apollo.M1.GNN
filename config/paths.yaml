@@ -1,9 +1,16 @@
 raw:
-  projects: data/raw_merged/public_RnD_embeddings_pro_260324.pkl
-  companies: data/raw_merged/company_embeddings_pro_0925_260324.pkl
+  projects: data/raw_merged/public_RnD_embeddings_bge_m3_260324.pkl
+  companies: data/raw_merged/company_embeddings_bge_m3_0925_260324.pkl
   edges_royalty: data/raw_merged/df_pr_royalty_260417_valid_biz.pkl
   edges_commercial: data/raw_merged/df_pr_commercial_260417_valid_biz.pkl
   edges_performance: data/raw_merged/df_project_bizno_valid.pkl
+  edges_patent: data/raw_merged/df_patent_edges.pkl   # scripts/build_patent_edges.py
+
+# 노드 피처로 쓸 임베딩. 그래프 안에서는 항상 `norm_embed` 라는 이름으로 다룬다.
+embedding:
+  name: bge-m3                 # 표시 이름 (LLM 매칭 비교의 임베딩 검색 모델 이름)
+  column: bge_m3_embed         # 노드 pickle 의 벡터 컬럼 (pro-sroberta: norm_embed)
+  drop_missing: true           # 벡터가 없는 과제·기업은 그래프(학습·평가)에서 제외
 
 processed:
   graph: data/processed/graph.pt
@@ -21,3 +28,4 @@ edge_columns:
   royalty: { project: 과제고유번호, company: 기술실시대상기관_사업자번호 }
   commercial: { project: 과제고유번호, company: 사업화주체_사업자등록번호 }
   performance: { project: 과제고유번호, company: 사업자번호 }
+  patent: { project: 과제고유번호, company: 사업자번호 }

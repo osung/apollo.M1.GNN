@@ -47,8 +47,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.data.loader import embedding_config
 from src.utils import load_yaml
-
 
 GENERIC_TERMS = [
     r"수시연구", r"자유공모", r"창의기초연구", r"핵심연구지원",
@@ -171,6 +171,7 @@ def merge_projects(
     canonical_map: dict,
     embed_strategy: str,
     score_agg: str,
+    embed_col: str = "norm_embed",
 ) -> pd.DataFrame:
     proj_df = proj_df.copy()
     proj_df["_canon"] = proj_df["과제고유번호"].map(canonical_map)
@@ -190,10 +191,10 @@ def merge_projects(
         row.pop("_canon", None)
 
         embeds = np.stack(
-            [np.asarray(e, dtype=np.float32) for e in sub["norm_embed"].tolist()]
+            [np.asarray(e, dtype=np.float32) for e in sub[embed_col].tolist()]
         )
         scores = sub["유망성점수"].to_numpy(dtype=np.float32)
-        row["norm_embed"] = _aggregate_embed(embeds, scores, embed_strategy)
+        row[embed_col] = _aggregate_embed(embeds, scores, embed_strategy)
 
         if score_agg == "max":
             row["유망성점수"] = float(scores.max())
@@ -239,6 +240,17 @@ def main() -> None:
 
     print(f"[merge] loading projects:   {raw['projects']}")
     proj_df = pd.read_pickle(raw["projects"])
+    embed_col, _, embed_name = embedding_config(paths)
+    if embed_col not in proj_df.columns:
+        raise KeyError(f"'{embed_col}' column not found in {raw['projects']}")
+    if proj_df[embed_col].isna().any():
+        raise ValueError(f"{int(proj_df[embed_col].isna().sum()):,} projects have no "
+                         f"'{embed_col}' vector; merging would average over missing vectors")
+    # only the configured embedding is aggregated; drop any other embedding column so a
+    # stale, un-aggregated vector cannot be picked up later
+    proj_df = proj_df.drop(columns=[c for c in proj_df.columns
+                                    if c.endswith("embed") and c != embed_col])
+    print(f"[merge] embedding: {embed_name} (column '{embed_col}')")
     print(f"[merge] loading bizno:      {raw['edges_performance']}")
     bizno_df = pd.read_pickle(raw["edges_performance"])
 
@@ -257,7 +269,7 @@ def main() -> None:
     print(f"[merge] aggregating projects "
           f"(embed_strategy={args.embed_strategy}, score_agg={args.score_agg})")
     merged_proj = merge_projects(
-        proj_df, canonical_map, args.embed_strategy, args.score_agg
+        proj_df, canonical_map, args.embed_strategy, args.score_agg, embed_col
     )
     assert len(merged_proj) == n_can, f"expected {n_can}, got {len(merged_proj)}"
 
