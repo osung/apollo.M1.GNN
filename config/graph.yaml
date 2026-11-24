@@ -75,3 +75,9 @@ auxiliary_edges:
     top_m: 5                   # 노드마다 물려받는 상대 수
     min_similarity: 0.0        # 이웃으로 인정할 최소 bge-m3 코사인 유사도
 
+# 축소 실험 그래프 (scripts/build_subgraph.py). node_relations 의 간선(학습 + held-out)이
+# 하나라도 있는 노드만 남기고, 양 끝이 모두 남은 간선만 유지한다. 유사도·파생 간선과
+# 하드 네거티브는 output_dir 안에서 축소 그래프 기준으로 다시 만든다.
+subgraph:
+  node_relations: [royalty, commercial, performance]
+  output_dir: data/processed/sub_real
