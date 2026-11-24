@@ -5,6 +5,7 @@ import numpy as np
 from scripts.llm_match_score import MockEngine, score_chunk
 from src.baselines.llm_match import (
     core_name,
+    extend_candidates,
     iter_jobs,
     load_candidates,
     load_scores,
@@ -12,6 +13,7 @@ from src.baselines.llm_match import (
     rerank,
     save_candidates,
     select_queries,
+    tiered_candidates,
     topn_candidates,
     union_candidates,
 )
@@ -154,3 +156,40 @@ def test_candidates_roundtrip_by_retriever(tmp_path):
     got = load_candidates(tmp_path, "p2c")
     assert sorted(got) == ["bge-m3", "lightfm"]
     assert got["lightfm"]["cand_idx"].tolist() == [[1, 2], [3, 4]]
+
+
+def test_tiered_candidates_first_tier_matches_union_and_tiers_are_disjoint():
+    rng = np.random.default_rng(0)
+    a = np.stack([rng.permutation(50)[:12] for _ in range(4)])
+    b = np.stack([rng.permutation(50)[:12] for _ in range(4)])
+    tiers = tiered_candidates([a, b], [4, 8, 12], seed=3)
+    assert tiers[0] == union_candidates([a[:, :4], b[:, :4]], seed=3)
+    for q in range(4):
+        rows = [t[q] for t in tiers]
+        flat = [c for r in rows for c in r]
+        assert len(flat) == len(set(flat))
+        assert set(rows[0]) | set(rows[1]) == set(a[q, :8]) | set(b[q, :8])
+        assert set(flat) == set(a[q]) | set(b[q])
+
+
+def test_iter_jobs_continues_job_numbers_across_depth_tiers():
+    q = np.array([0])
+    p_text = {"p0": {"과제명": "과제"}}
+    c_text = {f"c{i}": {"한글업체명": f"기업{i}"} for i in range(6)}
+    c_ids = [f"c{i}" for i in range(6)]
+    first = list(iter_jobs("p2c", q, [[0, 1, 2]], ["p0"], c_ids, p_text, c_text, 2, depth=3))
+    more = list(iter_jobs("p2c", q, [[3, 4, 5]], ["p0"], c_ids, p_text, c_text, 2,
+                          first_batch=[len(first)], depth=6))
+    assert [j["job_id"] for j in first] == ["p2c:0:0", "p2c:0:1"]
+    assert [j["job_id"] for j in more] == ["p2c:0:2", "p2c:0:3"]
+    assert {j["depth"] for j in more} == {6}
+
+
+def test_extend_candidates_keeps_saved_prefix():
+    prev = np.array([[5, 3]])
+    prev_s = np.array([[0.9, 0.8]], dtype=np.float32)
+    new = np.array([[3, 5, 7, 9]])          # same top-2 in another order, then deeper ones
+    new_s = np.array([[0.9, 0.9, 0.7, 0.6]], dtype=np.float32)
+    idx, score = extend_candidates(prev, prev_s, new, new_s)
+    assert idx.tolist() == [[5, 3, 7, 9]]
+    assert np.allclose(score, [[0.9, 0.8, 0.7, 0.6]])

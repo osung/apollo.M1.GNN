@@ -34,12 +34,14 @@ if str(ROOT) not in sys.path:
 
 from src.baselines.llm_match import (
     build_text_lookup,
+    candidate_path,
+    extend_candidates,
     held_out_queries,
     iter_jobs,
     load_candidates,
     save_candidates,
+    tiered_candidates,
     topn_candidates,
-    union_candidates,
 )
 from src.data.loader import embedding_config
 from src.graph.schema import (
@@ -60,6 +62,22 @@ def log(msg: str) -> None:
     print(time.strftime("[%H:%M:%S]"), msg, flush=True)
 
 
+def save_deepened(out_dir: Path, direction: str, name: str, query_idx: np.ndarray,
+                  cand_idx: np.ndarray, base: np.ndarray, keep_prefix: bool = True) -> None:
+    """Save a retriever's candidates. With keep_prefix (LLM re-ranked retrievers), a
+    shallower list saved for the same queries stays the prefix of the new one, so pairs the
+    LLM already scored remain valid. Others are simply replaced (e.g. a retrained GNN)."""
+    path = candidate_path(out_dir, direction, name)
+    if keep_prefix and path.exists():
+        with np.load(path) as z:
+            prev_q, prev_idx, prev_score = z["query_idx"], z["cand_idx"], z["base_score"]
+        if (prev_q.shape == query_idx.shape and (prev_q == query_idx).all()
+                and prev_idx.shape[1] <= cand_idx.shape[1]):
+            cand_idx, base = extend_candidates(prev_idx, prev_score, cand_idx, base)
+            log(f"[{direction}] '{name}': kept the saved top-{prev_idx.shape[1]} as prefix")
+    save_candidates(out_dir, direction, name, query_idx, cand_idx, base)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--paths", default="config/paths.yaml")
@@ -67,6 +85,8 @@ def main() -> None:
     parser.add_argument("--max-per-relation", type=int, default=None,
                         help="override queries.max_per_relation (0 = all held-out queries)")
     parser.add_argument("--topn", type=int, default=None, help="override candidates.topn")
+    parser.add_argument("--directions", nargs="+", default=None, choices=["p2c", "c2p"],
+                        help="override queries.directions")
     args = parser.parse_args()
 
     paths = load_yaml(args.paths)
@@ -78,6 +98,12 @@ def main() -> None:
     topn = args.topn or int(ccfg["topn"])
     if topn < max(cfg["eval"]["ks"]):
         raise SystemExit(f"candidates.topn={topn} must be >= max(eval.ks)={max(cfg['eval']['ks'])}")
+    # LLM re-ranking depths: topn first, then each deeper tier adds only the new candidates
+    depths = sorted({topn, *(int(d) for d in ccfg.get("llm_depths") or [])})
+    if depths[0] != topn:
+        raise SystemExit(f"candidates.llm_depths must all be >= candidates.topn={topn}")
+    max_depth = depths[-1]
+    directions = args.directions or qcfg["directions"]
     out_dir = Path(cfg["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -106,10 +132,10 @@ def main() -> None:
     mask_names = bool(cfg["texts"].get("mask_linked_company_names", True))
     need_p: set[int] = set()
     need_c: set[int] = set()
-    selected: dict[str, tuple[np.ndarray, list[list[int]]]] = {}
+    selected: dict[str, tuple[np.ndarray, list[list[list[int]]]]] = {}
     z_p_path = Path(paths["processed"]["project_emb"])
     z_c_path = Path(paths["processed"]["company_emb"])
-    for direction in qcfg["directions"]:
+    for direction in directions:
         query_idx = held_out_queries(held_out, direction, REAL_EDGE_TYPES, max_per_rel,
                                      int(qcfg["seed"]))
         q_x, c_x = (project_x, company_x) if direction == "p2c" else (company_x, project_x)
@@ -122,12 +148,13 @@ def main() -> None:
             promise = (
                 df.set_index(df[id_col].astype(str))["유망성점수"].reindex(ids).to_numpy()
             )
-        log(f"[{direction}] {len(query_idx):,} queries -> top-{topn} candidates per retriever")
+        log(f"[{direction}] {len(query_idx):,} queries -> top-{max_depth} candidates per "
+            f"retriever")
         cand_idx, base = topn_candidates(
-            q_x[query_idx], c_x, topn, cand_promise=promise, promise_weight=promise_w,
+            q_x[query_idx], c_x, max_depth, cand_promise=promise, promise_weight=promise_w,
             device=ccfg["device"], batch_size=int(ccfg["batch_size"]),
         )
-        save_candidates(out_dir, direction, embed_name, query_idx, cand_idx, base)
+        save_deepened(out_dir, direction, embed_name, query_idx, cand_idx, base)
         for name, tag in (cfg.get("retrievers") or {}).items():
             zp_file = z_p_path.with_name(f"{z_p_path.stem}_{tag}.npy")
             zc_file = z_c_path.with_name(f"{z_c_path.stem}_{tag}.npy")
@@ -139,32 +166,39 @@ def main() -> None:
             z_c = np.load(zc_file)
             z_q, z_cand = (z_p, z_c) if direction == "p2c" else (z_c, z_p)
             cand_idx, base = topn_candidates(
-                z_q[query_idx], z_cand, topn,
+                z_q[query_idx], z_cand, max_depth,
                 device=ccfg["device"], batch_size=int(ccfg["batch_size"]),
             )
-            save_candidates(out_dir, direction, name, query_idx, cand_idx, base)
+            save_deepened(out_dir, direction, name, query_idx, cand_idx, base,
+                          keep_prefix=name in (cfg.get("llm_rerank") or [name]))
             del z_p, z_c
 
         cands = load_candidates(out_dir, direction)
         for name, c in list(cands.items()):
             same = c["query_idx"].shape == query_idx.shape and (c["query_idx"] == query_idx).all()
-            if not same or c["cand_idx"].shape[1] != topn:
+            if not same or c["cand_idx"].shape[1] < topn:
                 log(f"[{direction}] ! skipping stale candidates of '{name}' "
-                    f"(different query sample or topn; regenerate it)")
+                    f"(different query sample or fewer than {topn} candidates; regenerate it)")
                 del cands[name]
         rerank_names = cfg.get("llm_rerank") or list(cands)
         absent = [n for n in rerank_names if n not in cands]
         if absent:
             raise SystemExit(f"llm_rerank retrievers without candidates: {absent}")
-        union = union_candidates([cands[n]["cand_idx"] for n in rerank_names],
-                                 int(qcfg["seed"]))
-        n_pairs = sum(len(u) for u in union)
+        shallow = [n for n in rerank_names if cands[n]["cand_idx"].shape[1] < max_depth]
+        if shallow:
+            raise SystemExit(f"llm_rerank retrievers with fewer than {max_depth} candidates: "
+                             f"{shallow}")
+        tiers = tiered_candidates([cands[n]["cand_idx"] for n in rerank_names], depths,
+                                  int(qcfg["seed"]))
         log(f"[{direction}] retrievers: {', '.join(cands)}; LLM re-ranks "
-            f"{', '.join(rerank_names)} -> {n_pairs:,} unique pairs "
-            f"({n_pairs / len(union):.0f} per query)")
-        selected[direction] = (query_idx, union)
+            f"{', '.join(rerank_names)}")
+        for depth, tier in zip(depths, tiers, strict=True):
+            n_pairs = sum(len(u) for u in tier)
+            log(f"[{direction}]   depth {depth}: +{n_pairs:,} unique pairs "
+                f"({n_pairs / len(tier):.0f} per query)")
+        selected[direction] = (query_idx, tiers)
         q_set = set(query_idx.tolist())
-        c_set = {c for u in union for c in u}
+        c_set = {c for tier in tiers for u in tier for c in u}
         (need_p if direction == "p2c" else need_c).update(q_set)
         (need_c if direction == "p2c" else need_p).update(c_set)
         if mask_names and direction == "p2c":
@@ -197,7 +231,8 @@ def main() -> None:
     def company_name(c_i: int) -> str:
         return str(company_text.get(company_ids[c_i], {}).get("한글업체명", ""))
 
-    for direction, (query_idx, cand_idx) in selected.items():
+    batch = int(cfg["llm"]["batch"])
+    for direction, (query_idx, tiers) in selected.items():
         path = out_dir / f"jobs_{direction}.jsonl"
         mask: dict[int, list[str]] = {}
         if mask_names:
@@ -207,12 +242,17 @@ def main() -> None:
                 else:                    # hide the query company's name in candidate projects
                     mask[q] = [company_name(q)]
         n = 0
+        first_batch = [0] * len(query_idx)
         with open(path, "w", encoding="utf-8") as f:
-            for job in iter_jobs(direction, query_idx, cand_idx, project_ids, company_ids,
-                                 project_text, company_text, int(cfg["llm"]["batch"]),
-                                 mask=mask):
-                f.write(json.dumps(job, ensure_ascii=False) + "\n")
-                n += 1
+            # depth-major order: every query is scored to depth d before any goes deeper
+            for depth, tier in zip(depths, tiers, strict=True):
+                for job in iter_jobs(direction, query_idx, tier, project_ids, company_ids,
+                                     project_text, company_text, batch, mask=mask,
+                                     first_batch=first_batch, depth=depth):
+                    f.write(json.dumps(job, ensure_ascii=False) + "\n")
+                    n += 1
+                first_batch = [b + -(-len(u) // batch)
+                               for b, u in zip(first_batch, tier, strict=True)]
         log(f"[{direction}] wrote {n:,} jobs -> {path}")
 
 

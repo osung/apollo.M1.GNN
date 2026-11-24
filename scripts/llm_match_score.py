@@ -136,6 +136,8 @@ def main() -> None:
     parser.add_argument("--direction", default="p2c", choices=["p2c", "c2p"])
     parser.add_argument("--shard-id", type=int, default=0)
     parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--max-depth", type=int, default=None,
+                        help="score only jobs up to this candidate depth (job field 'depth')")
     parser.add_argument("--limit-queries", type=int, default=None,
                         help="score only the first N queries of this shard (speed test)")
     parser.add_argument("--model", default=None, help="override llm.model")
@@ -165,6 +167,8 @@ def main() -> None:
         for line in f:
             job = json.loads(line)
             if job["query_rank"] % args.num_shards != args.shard_id:
+                continue
+            if args.max_depth is not None and job.get("depth", 0) > args.max_depth:
                 continue
             jobs.append(job)
     if args.limit_queries is not None:

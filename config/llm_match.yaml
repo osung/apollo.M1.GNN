@@ -18,7 +18,7 @@ output_dir: data/processed/llm_match
 # LightFM 처럼 임베딩 파일이 없는 모델은 스스로 후보 파일을 쓴다:
 #   python scripts/baseline_lightfm.py --save-candidates
 retrievers:
-  lightgcn: lightgcn_h128_l2_hr40_c2p100_sim10_nonorm_wn67_mbe
+  lightgcn: lightgcn_h128_l2_hr40_c2p100_sim10_nonorm_mpw_wn67_mbe_pat_kw_inh
   hgt: hgt_h128_l2_nh4_hr40_c2p100_sim10_nonorm_wn67_mbe
 
 # LLM 으로 재랭킹할 검색 모델. 여기 적힌 모델의 후보만 LLM 이 채점한다(여러 개면 합집합).
@@ -32,6 +32,9 @@ queries:
 
 candidates:
   topn: 100                    # 검색 모델별로 LLM 이 채점할 상위 후보 수 (>= eval k 의 최댓값)
+  # LLM 재랭킹 깊이 추가분. topn 까지 채점한 뒤 깊이별로 새로 들어온 후보만 추가 채점한다
+  # (이미 채점한 쌍은 다시 채점하지 않는다). 평가: scripts/llm_match_eval.py --topn 200
+  llm_depths: [200, 300, 500]
   # 후보 점수 = (1 - promise_weight) * cos + promise_weight * 유망성점수/100
   # 0.0 = 순수 임베딩 코사인. apollo 납품 파이프라인은 0.4 를 쓴다.
   promise_weight: 0.0

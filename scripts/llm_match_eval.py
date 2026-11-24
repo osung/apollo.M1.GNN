@@ -48,6 +48,9 @@ def main() -> None:
     parser.add_argument("--paths", default="config/paths.yaml")
     parser.add_argument("--config", default="config/llm_match.yaml")
     parser.add_argument("--direction", default="p2c", choices=["p2c", "c2p"])
+    parser.add_argument("--topn", type=int, default=None,
+                        help="LLM re-ranking depth: re-rank each retriever's top-N "
+                             "(default candidates.topn; deeper ones are in candidates.llm_depths)")
     args = parser.parse_args()
 
     paths = load_yaml(args.paths)
@@ -55,6 +58,8 @@ def main() -> None:
     ks = tuple(int(k) for k in cfg["eval"]["ks"])
     out_dir = Path(cfg["output_dir"])
     d = args.direction
+    base_topn = int(cfg["candidates"]["topn"])
+    depth = args.topn or base_topn
 
     cands = load_candidates(out_dir, d)
     if not cands:
@@ -64,17 +69,21 @@ def main() -> None:
     scores = load_scores(sorted(out_dir.glob(f"scores_{d}_shard*.jsonl"))).get(d, {})
 
     rerank_names = [n for n in (cfg.get("llm_rerank") or list(cands)) if n in cands]
+    shallow = [n for n in rerank_names if cands[n]["cand_idx"].shape[1] < depth]
+    if shallow:
+        raise SystemExit(f"--topn {depth} exceeds the saved candidates of {shallow}")
 
     # keep only queries for which every LLM-re-ranked retriever's candidates were all scored
     def scored(i: int) -> bool:
         s = scores.get(int(query_idx[i]), {})
-        return all(int(x) in s for n in rerank_names for x in cands[n]["cand_idx"][i])
+        return all(int(x) in s for n in rerank_names
+                   for x in cands[n]["cand_idx"][i, :depth])
 
     rows = [i for i in range(len(query_idx)) if scored(i)]
     if not rows:
         raise SystemExit(f"no fully scored queries for direction {d} in {out_dir}")
-    print(f"[llm-eval] {d}: {len(rows):,} of {len(query_idx):,} prepared queries fully scored; "
-          f"retrievers: {', '.join(cands)}; LLM re-ranks: {', '.join(rerank_names)}")
+    print(f"[llm-eval] {d}: {len(rows):,} of {len(query_idx):,} prepared queries fully scored "
+          f"to depth {depth}; retrievers: {', '.join(cands)}; LLM re-ranks: {', '.join(rerank_names)}")
     q_sel = query_idx[rows]
     preds: dict[str, np.ndarray] = {}
     for name, c in cands.items():
@@ -82,13 +91,18 @@ def main() -> None:
         preds[name] = cand_idx[rows]
         if name not in rerank_names:
             continue
-        reranked = np.empty_like(preds[name])
+        reranked = np.empty_like(preds[name][:, :depth])
         for r, i in enumerate(rows):
             s = scores[int(query_idx[i])]
-            llm = np.asarray([s[int(x)] for x in cand_idx[i]], dtype=np.float32)
-            reranked[r] = rerank(cand_idx[i], base[i], llm)
+            llm = np.asarray([s[int(x)] for x in cand_idx[i, :depth]], dtype=np.float32)
+            reranked[r] = rerank(cand_idx[i, :depth], base[i, :depth], llm)
         preds[f"{name}+LLM"] = reranked
-    n = next(iter(cands.values()))["cand_idx"].shape[1]
+
+    def ks_for(name: str) -> tuple[int, ...]:
+        # the re-ranked retrievers also report @depth: the share of queries whose held-out
+        # partner is among the candidates the LLM saw (the ceiling of re-ranking)
+        base_name = name.removesuffix("+LLM")
+        return tuple(sorted({*ks, depth})) if base_name in rerank_names else ks
 
     held_out = torch.load(Path(paths["processed"]["graph"]).with_name("held_out.pt"),
                           weights_only=False)
@@ -104,13 +118,15 @@ def main() -> None:
         if not qs:
             continue
         sel = [q_pos[q] for q in qs]
-        results[et] = {name: evaluate(p[sel], qs, gt, ks=ks) for name, p in preds.items()}
+        results[et] = {name: evaluate(p[sel], qs, gt, ks=ks_for(name))
+                       for name, p in preds.items()}
         for q, items in gt.items():
             gt_all.setdefault(q, set()).update(items)
     # all relations together: a candidate is relevant if linked by any held-out relation
     n_queries["all"] = len(q_pos)
     qs_all = [q for q in q_sel.tolist() if q in gt_all]
-    results["all"] = {name: evaluate(p[[q_pos[q] for q in qs_all]], qs_all, gt_all, ks=ks)
+    results["all"] = {name: evaluate(p[[q_pos[q] for q in qs_all]], qs_all, gt_all,
+                                     ks=ks_for(name))
                       for name, p in preds.items()}
 
     # Split by whether the query project's document named a linked company (masked as
@@ -124,7 +140,7 @@ def main() -> None:
             n_queries[label] = len(qs)
             if qs:
                 results[label] = {
-                    name: evaluate(p[[q_pos[q] for q in qs]], qs, gt_all, ks=ks)
+                    name: evaluate(p[[q_pos[q] for q in qs]], qs, gt_all, ks=ks_for(name))
                     for name, p in preds.items()
                 }
 
@@ -134,9 +150,10 @@ def main() -> None:
             print(f"  {name:22s} " + "  ".join(f"{k}={v:.4f}" for k, v in m.items()))
 
     miss = sum(1 for q in q_sel.tolist() for v in scores[int(q)].values() if v == 0)
-    out_path = out_dir / f"metrics_{d}.json"
+    out_path = out_dir / (f"metrics_{d}.json" if depth == base_topn
+                          else f"metrics_{d}_top{depth}.json")
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump({"direction": d, "topn": int(n), "n_queries": n_queries,
+        json.dump({"direction": d, "topn": depth, "n_queries": n_queries,
                    "llm_rerank": rerank_names,
                    "llm_model": cfg["llm"]["model"],
                    "promise_weight": cfg["candidates"]["promise_weight"],

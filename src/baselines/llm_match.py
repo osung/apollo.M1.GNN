@@ -118,6 +118,28 @@ def union_candidates(cand_lists: Sequence[np.ndarray], seed: int) -> list[list[i
     return out
 
 
+def tiered_candidates(
+    cand_lists: Sequence[np.ndarray], depths: Sequence[int], seed: int
+) -> list[list[list[int]]]:
+    """Split the candidate union into depth tiers: out[t][q] holds the candidates that enter
+    query q's union between depths[t-1] and depths[t] (rank-wise), shuffled.
+
+    The first tier equals `union_candidates` of the top-depths[0] lists, so jobs that were
+    already scored at a shallower depth keep their ids and are not scored again.
+    """
+    seen: list[set[int]] = [set() for _ in range(len(cand_lists[0]))]
+    out = []
+    prev = 0
+    for depth in sorted(depths):
+        tier = union_candidates([c[:, prev:depth] for c in cand_lists], seed)
+        tier = [[c for c in row if c not in s] for row, s in zip(tier, seen, strict=True)]
+        for row, s in zip(tier, seen, strict=True):
+            s.update(row)
+        out.append(tier)
+        prev = depth
+    return out
+
+
 def topn_candidates(
     query_x: np.ndarray,
     cand_x: np.ndarray,
@@ -149,6 +171,26 @@ def topn_candidates(
         idx_out.append(top.indices.cpu().numpy())
         score_out.append(top.values.cpu().numpy())
     return np.concatenate(idx_out).astype(np.int64), np.concatenate(score_out).astype(np.float32)
+
+
+def extend_candidates(
+    prev_idx: np.ndarray, prev_score: np.ndarray, idx: np.ndarray, score: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Deepen a saved candidate list without touching it: each row keeps `prev_idx` as its
+    prefix and is filled up to the new depth with the entries of `idx` not already in it.
+
+    A fresh top-N of a larger N can order ties differently, which would change the
+    shallower lists that the LLM has already scored.
+    """
+    n = idx.shape[1]
+    out_idx = np.empty_like(idx)
+    out_score = np.empty_like(score)
+    for r in range(idx.shape[0]):
+        have = set(prev_idx[r].tolist())
+        keep = [k for k, c in enumerate(idx[r].tolist()) if c not in have]
+        out_idx[r] = np.concatenate([prev_idx[r], idx[r, keep]])[:n]
+        out_score[r] = np.concatenate([prev_score[r], score[r, keep]])[:n]
+    return out_idx, out_score
 
 
 def rerank(cand_idx: np.ndarray, base_score: np.ndarray, llm_score: np.ndarray) -> np.ndarray:
@@ -193,8 +235,13 @@ def iter_jobs(
     company_text: Mapping[str, Mapping[str, Any]],
     batch: int,
     mask: Mapping[int, Sequence[str]] | None = None,
+    first_batch: Sequence[int] | None = None,
+    depth: int | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield one scoring job (<= `batch` candidates) at a time, grouped by query.
+
+    first_batch: per query, the number of the first job (jobs of earlier depth tiers come
+    before it); depth: the candidate depth this tier completes, recorded in the job.
 
     mask: query index -> company names to hide from the *project* documents of
     that query's prompts (the query project for p2c, the candidate projects
@@ -216,13 +263,14 @@ def iter_jobs(
         names = (mask or {}).get(q, ())
         if names and direction == "p2c":
             src_text = mask_names(src_text, names)
+        offset = first_batch[rank] if first_batch is not None else 0
         for b in range(0, len(row), batch):
             chunk = row[b : b + batch]
             cand_texts = [doc(cand_kind, c) for c in chunk]
             if names and direction == "c2p":
                 cand_texts = [mask_names(t, names) for t in cand_texts]
-            yield {
-                "job_id": f"{direction}:{q}:{b // batch}",
+            job: dict[str, Any] = {
+                "job_id": f"{direction}:{q}:{offset + b // batch}",
                 "direction": direction,
                 "query": q,
                 "query_rank": rank,
@@ -233,6 +281,9 @@ def iter_jobs(
                 "src_text": src_text,
                 "cand_texts": cand_texts,
             }
+            if depth is not None:
+                job["depth"] = depth
+            yield job
 
 
 def read_jsonl(path: str | Path) -> Iterator[dict[str, Any]]:
