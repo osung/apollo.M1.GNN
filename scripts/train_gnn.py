@@ -34,6 +34,7 @@ from src.graph.schema import (
     EDGE_ROYALTY,
     NODE_TYPE_COMPANY,
     NODE_TYPE_PROJECT,
+    EVAL_EDGE_TYPES,
     OBSERVED_EDGE_TYPES,
     pair_keys,
 )
@@ -89,6 +90,8 @@ def _build_experiment_tag(
     warm_neg_ratio: float = 0.0,
     mask_batch_edges: bool = False,
     graph_extras: tuple[str, ...] = (),
+    fanouts: list[int] | None = None,
+    neighbor_selection: str = "random",
 ) -> str:
     """Build a collision-free filename tag that reflects the hyperparameters
     a user is most likely to vary across parallel runs.
@@ -137,6 +140,9 @@ def _build_experiment_tag(
         parts.append("mbe")
     # extra relations in the graph: pat (patent), kw (keyword), inh (inherited)
     parts.extend(graph_extras)
+    if fanouts:
+        parts.append("mb" + "x".join(str(f) for f in fanouts)
+                     + ("top" if neighbor_selection == "top_score" else ""))
 
     return "_".join(parts)
 
@@ -237,15 +243,21 @@ def _attach_aux_edges(graph, graph_cfg: dict, name: str, path: str,
     n_p, n_c = graph[NODE_TYPE_PROJECT].num_nodes, graph[NODE_TYPE_COMPANY].num_nodes
     if (int(z["n_project"]), int(z["n_company"])) != (n_p, n_c):
         raise ValueError(f"{cache} was built for a different graph; rebuild it.")
+    score = np.asarray(z["score"], dtype=np.float32) if "score" in z.files else None
     n_removed = 0
     if held_out_keys is not None:
-        ei, n_removed = drop_pairs(ei, n_c, held_out_keys)
-    _set_relation(graph, graph_cfg, name, ei)
+        keep = ~np.isin(pair_keys(ei, n_c), held_out_keys)
+        n_removed = int((~keep).sum())
+        ei = ei[:, keep]
+        score = score[keep] if score is not None else None
+    _set_relation(graph, graph_cfg, name, ei, score)
     print(f"[train_gnn] added {name} edges: |E|={ei.shape[1]:,}  "
           f"(removed {n_removed:,} equal to held-out pairs)")
 
 
-def _set_relation(graph, graph_cfg: dict, name: str, ei: np.ndarray) -> None:
+def _set_relation(graph, graph_cfg: dict, name: str, ei: np.ndarray,
+                  score: np.ndarray | None = None) -> None:
+    """score: per-edge importance (used by neighbor_selection='top_score')."""
     edge_index = torch.from_numpy(np.ascontiguousarray(ei))
     weight = float(graph_cfg.get("edge_types", {}).get(name, {}).get("weight", 0.25))
     as_attr = bool(graph_cfg.get("edge_weights_as_attr", True))
@@ -257,6 +269,8 @@ def _set_relation(graph, graph_cfg: dict, name: str, ei: np.ndarray) -> None:
         graph[rel].edge_index = e
         if as_attr:
             graph[rel].edge_weight = torch.full((e.shape[1],), weight, dtype=torch.float32)
+        if score is not None:
+            graph[rel].edge_score = torch.from_numpy(np.ascontiguousarray(score))
 
 
 def _evaluate_z(
@@ -451,6 +465,39 @@ def main() -> None:
         help="remove each batch's positive pairs from message passing while they are "
              "being scored; overrides train.yaml gnn.mask_batch_edges. Tag gets '_mbe'.",
     )
+    parser.add_argument(
+        "--fanouts", type=int, nargs="+", default=None,
+        help="mini-batch training with neighbor sampling: in-edges kept per node and "
+             "relation at each hop from the batch nodes (one value per layer); overrides "
+             "train.yaml gnn.minibatch.fanouts. Tag gets '_mbF1xF2'.",
+    )
+    parser.add_argument(
+        "--neighbor-selection", choices=["random", "top_score"], default=None,
+        help="which in-edges mini-batch training keeps: a random subset, or always the "
+             "highest-scored ones (then also used for the embeddings); overrides train.yaml "
+             "gnn.minibatch.neighbor_selection. Tag gets 'top' after the fanouts.",
+    )
+    parser.add_argument(
+        "--drop-relations", nargs="*", default=[],
+        help="observed relations to leave out of the graph (training positives and message "
+             "passing, with their reverse), e.g. patent. For ablations.",
+    )
+    parser.add_argument(
+        "--tag-suffix", default="",
+        help="appended to the experiment tag, to keep an ablation's files apart from "
+             "an earlier run with the same hyperparameters",
+    )
+    parser.add_argument(
+        "--gpu-mem-fraction", type=float, default=None,
+        help="cap this process's GPU memory at that share of the device "
+             "(train.yaml gnn.gpu_memory_fraction). The allocator then reuses cached blocks "
+             "instead of growing until the unified memory is full.",
+    )
+    parser.add_argument(
+        "--eval-chunk-nodes", type=int, default=None,
+        help="target nodes per chunk when computing the full-graph embeddings "
+             "(train.yaml gnn.minibatch.eval_chunk_nodes)",
+    )
     args = parser.parse_args()
 
     paths = load_yaml(args.paths)
@@ -467,6 +514,14 @@ def main() -> None:
     print(f"[train_gnn] loading graph {graph_path}")
     graph = torch.load(graph_path, weights_only=False)
     held_out = torch.load(held_out_path, weights_only=False)
+    for name in args.drop_relations:
+        if name not in OBSERVED_EDGE_TYPES or name in EVAL_EDGE_TYPES:
+            raise SystemExit(f"--drop-relations: '{name}' is not a droppable observed relation")
+        for et in ((NODE_TYPE_PROJECT, name, NODE_TYPE_COMPANY),
+                   (NODE_TYPE_COMPANY, f"rev_{name}", NODE_TYPE_PROJECT)):
+            if et in graph.edge_types:
+                del graph[et]
+        print(f"[train_gnn] dropped relation '{name}' from the graph")
 
     for nt in graph.node_types:
         x = getattr(graph[nt], "x", None)
@@ -570,8 +625,10 @@ def main() -> None:
         )
     # PyG lazy layers (SAGEConv/GATConv with in_channels=-1) need one forward
     # pass to materialize parameter shapes before anything reads .parameters().
-    with torch.no_grad():
-        model(graph.x_dict, graph.edge_index_dict)
+    # HGTConv has no lazy parameters, and a full-graph CPU pass of it is slow and large.
+    if layer_type != "hgt":
+        with torch.no_grad():
+            model(graph.x_dict, graph.edge_index_dict)
     n_params = sum(p.numel() for p in model.parameters() if not p.__class__.__name__.startswith("Uninit"))
     print(
         f"[train_gnn] layer_type={layer_type}  params={n_params:,}  "
@@ -592,6 +649,31 @@ def main() -> None:
         args.mask_batch_edges if args.mask_batch_edges is not None
         else tr_cfg.get("mask_batch_edges", False)
     )
+
+    mem_fraction = args.gpu_mem_fraction or tr_cfg.get("gpu_memory_fraction")
+    if mem_fraction and str(args.device).startswith("cuda"):
+        torch.cuda.set_per_process_memory_fraction(float(mem_fraction))
+        print(f"[train_gnn] GPU memory capped at {float(mem_fraction):.0%} of the device")
+    mb_cfg = tr_cfg.get("minibatch") or {}
+    fanouts = args.fanouts or (mb_cfg.get("fanouts") if mb_cfg.get("enabled") else None)
+    eval_chunk_nodes = None
+    neighbor_selection = "random"
+    eval_seed_nodes = int(mb_cfg.get("eval_seed_nodes") or 20_000)
+    if fanouts:
+        neighbor_selection = args.neighbor_selection or mb_cfg.get("neighbor_selection") \
+            or "random"
+        fanouts = [int(f) for f in fanouts]
+        n_layers = int(args.num_layers or gnn_cfg["num_layers"])
+        if len(fanouts) != n_layers:
+            raise SystemExit(f"need one fanout per layer ({n_layers}), got {fanouts}")
+        if layer_type not in ("sage", "gat", "hgt"):
+            raise SystemExit(f"mini-batch training is not supported for '{layer_type}'")
+        if args.batch_size is None and mb_cfg.get("batch_size"):
+            bs = int(mb_cfg["batch_size"])
+        eval_chunk_nodes = int(args.eval_chunk_nodes or mb_cfg.get("eval_chunk_nodes") or 0) \
+            or None
+        print(f"[train_gnn] mini-batch training: fanouts={fanouts} batch_size={bs} "
+              f"eval_chunk_nodes={eval_chunk_nodes} neighbor_selection={neighbor_selection}")
 
     hard_neg_map: dict[int, np.ndarray] | None = None
     if args.hard_neg_path:
@@ -696,7 +778,11 @@ def main() -> None:
             short for name, short in (("patent", "pat"), ("keyword", "kw"), ("inherited", "inh"))
             if (NODE_TYPE_PROJECT, name, NODE_TYPE_COMPANY) in graph.edge_types
         ),
+        fanouts=fanouts,
+        neighbor_selection=neighbor_selection,
     )
+    if args.tag_suffix:
+        tag = f"{tag}_{args.tag_suffix}"
     print(f"[train_gnn] experiment tag: {tag}")
     if args.mp_edge_weights:
         print(
@@ -777,6 +863,11 @@ def main() -> None:
         amp_dtype=args.amp_dtype,
         use_mp_edge_weights=args.mp_edge_weights,
         mask_batch_edges=mask_batch_edges,
+        fanouts=fanouts,
+        eval_chunk_nodes=eval_chunk_nodes,
+        seed=seed,
+        neighbor_selection=neighbor_selection,
+        eval_seed_nodes=eval_seed_nodes,
     )
 
     # Final z saves: keep the paths.yaml defaults but append tag so parallel
